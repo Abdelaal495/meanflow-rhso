@@ -26,8 +26,9 @@ evaluations the backward pass traverses, `data_grads` = data-fidelity gradients.
 Every solver takes an optional `trace` list (default None: nothing recorded, results
 unchanged).  When given, the solver appends the executed state after every outer step,
 starting with x0, for trajectory figures.  RHSO, MPC-delta_t and MPC-RHC record x_k on their
-outer grids; PnP-Flow and Flower their iterates; D-Flow its optimised initial state q, then
-the output G(q).
+outer grids; PnP-Flow its denoised iterates; Flower its refined estimate mu at every step
+(not the re-noised state; the last mu is the output); D-Flow its optimised initial state q,
+then the output G(q).
 """
 from __future__ import annotations
 
@@ -419,7 +420,7 @@ def flower(prior, rows: Rows, num_flower_steps: int, trace: Optional[list] = Non
                 x = mu
             else:
                 x = (1.0 - t_next) * rows.noise.draw(rows, "flower", k) + t_next * mu
-            _record(trace, x)
+            _record(trace, mu)
     return x, cost
 
 

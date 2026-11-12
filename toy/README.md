@@ -130,24 +130,49 @@ files, logs (`train_<model>_tflow.log`) and table (`outputs/hexagon_study/stage1
 
 ```bash
 python -u toy/hexagon_stage2.py            # all priors, solvers and tasks, on the GPU
-python -u toy/hexagon_stage2.py --smoke    # tiny grids and seed counts
+python -u toy/hexagon_stage2.py --smoke    # tiny seed counts, short widening
+python -u toy/hexagon_stage2.py --tasks x_coordinate_s0.3      # one task; saved results are kept
+python -u toy/hexagon_stage2.py --rebuild-from-log outputs/hexagon_study/stage2/log_run1.txt \
+    --tasks corner off_edge x_coordinate_s0.1                   # restore solvers a stopped run finished
 ```
+
+- **Checkpoints.** Each finished (task, prior, solver) is saved in `stage2/results/` and
+  skipped on later runs (`--fresh` recomputes it). The CSVs and tables are assembled from all
+  saved results.
+- **Rebuilding.** `--rebuild-from-log` restores the solvers a stopped run had finished,
+  using the selected setting and the final grids from its log, with no retuning. Only their
+  test sets are re-evaluated. The per-setting tuning scores are not in the log, so those
+  solvers have no rows in `tuning.csv`.
+- **Chunking.** Each GPU call holds at most 262,144 row-evaluations (about 1.4 GB) and 32,768 rows, so the rows per call are
+  the budget divided by the model evaluations one backward pass holds (2N for RHSO with the Heun
+  suffix). The peak GPU memory of each call is logged. The computation for each row does not
+  depend on the chunk size, but float32 GPU matrix products round differently for different
+  batch sizes. Outputs therefore differ by about 1e-6 to 1e-4 between chunk sizes.
 
 The priors are the low-feature flow matching, iMF (the primary MeanFlow prior) and MeanFlow
 p = 0.5 models. The solvers are those of `toy/gmm_solvers.py`: RHSO (N * M = 160, plus the
 integrated-suffix variant for flow matching), one-step D-Flow, MPC-RHC, MPC-Δt, PnP-Flow and
-Flower, on the pre-registered pMF grids, with the image code's cost accounting.
+Flower, with the image code's cost accounting.
 
-- **Control task.** Phi(x) = 1/2 ||x - c||^2, with H = I and y = c, under the image code's
-  fidelity normalisations. There are two targets: the lower-right corner, and the point 0.5
-  below the midpoint of the lower edge. p* is the hexagon point nearest c. Each setting is
-  tuned on 64 seeds by the mean distance to p*, then tested on 512 fresh seeds. Flower's
-  sigma is tuned on {1, 0.3, 0.1, 0.03, 0.01}, as a weight on Phi like MPC's lambda.
+- **One objective.** Every solver sees the fidelity 1/2 ||Hx - y||^2. The per-measurement
+  solvers (RHSO, D-Flow, PnP) get the normaliser m = 1, and Flower weights it by w = 1 / sigma^2.
+- **Control task.** Phi(x) = 1/2 ||x - c||^2, with H = I and y = c. There are two targets: the
+  lower-right corner, and the point 0.5 below the midpoint of the lower edge. p* is the hexagon
+  point nearest c. Settings are tuned on 64 seeds by the mean distance to p*, then tested on
+  512 fresh seeds. Flower's weight w is tuned, like MPC's lambda.
 - **Inverse problem.** y = x_1 + sigma eps with sigma in {0.1, 0.3}. The exact posterior
-  along the hexagon comes from 1-D quadrature. Tuning uses 64 problems x 4 seeds, selecting
-  by MSE to x*; the test uses 512 problems x 16 seeds.
+  along the hexagon comes from 1-D quadrature. Tuning uses 64 problems x 16 seeds, selecting by
+  the sliced W2 between each problem's 16 outputs and 16 exact posterior samples. The test uses
+  512 problems x 16 seeds and reports MSE to x*, sliced W2 and distance to the hexagon.
+- **Grids.** Tuning starts from the pre-registered pMF grids, with MPC-Δt's lambda extended
+  down to 1 and 3 and Flower's control weight on {1, 10, ..., 1e4}. Any knob whose winner sits
+  on a grid edge is extended past that edge and the solver is retuned, until every winner is
+  interior, sits at a domain bound (mu = 0, K = 1, one step, N = 1 or 160), or the knob hits
+  its cap. The cap is 6 extensions, or 2 for step counts, whose cost grows and which may have
+  no interior optimum. `grids.csv` gives each knob's final grid, winner and status.
 
-Outputs go to `outputs/hexagon_study/stage2/`: `control.csv`, `inverse.csv`, `tuning.csv`,
-`log.txt` and `trajectories_{corner,off_edge}.png`. The figures show 16 test seeds per
-solver and prior. To support them, every solver in `toy/gmm_solvers.py` takes an optional
-`trace` list that records its outer-step states and leaves the result unchanged.
+Outputs go to `outputs/hexagon_study/stage2/`: `control.csv`, `inverse.csv`, `grids.csv`,
+`tuning.csv`, `log.txt` and `trajectories_{corner,off_edge}.png`. The figures show 16 test
+seeds per solver and prior; the PnP-Flow and Flower panels show only the denoised estimate at
+each step. To support them, every solver in `toy/gmm_solvers.py` takes an optional `trace`
+list that records its states and leaves the result unchanged.

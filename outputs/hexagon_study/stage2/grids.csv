@@ -1,0 +1,211 @@
+task,prior,solver,knob,grid,winner,status
+corner,flow_matching,rhso,NM,"[[4, 40], [8, 20], [10, 16]]","[8, 20]",interior
+corner,flow_matching,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1]",0.05,interior
+corner,flow_matching,rhso,mu,"[0.0, 0.2, 1.0, 3.0, 9.0]",3.0,interior
+corner,flow_matching,rhso_suffix,NM,"[[4, 40], [8, 20], [10, 16], [16, 10]]","[10, 16]",interior
+corner,flow_matching,rhso_suffix,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1]",0.02,interior
+corner,flow_matching,rhso_suffix,mu,"[0.0, 0.2, 1.0]",0.0,domain bound (min)
+corner,flow_matching,dflow,num_opt_steps,"[160, 320, 640, 1280, 2560]",2560,extension cap (max)
+corner,flow_matching,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3, 0.9, 2.7, 8.1, 24.3]",8.1,interior
+corner,flow_matching,mpc_rhc,K,"[1, 2, 3]",1,domain bound (min)
+corner,flow_matching,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0, 2160.0, 6480.0, 19440.0, 58320.0, 175000.0, 525000.0]",525000.0,extension cap (max)
+corner,flow_matching,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2, 0.6, 1.8]",0.6,interior
+corner,flow_matching,mpc_delta_t,num_mpc_steps,"[2, 4, 8, 16]",8,interior
+corner,flow_matching,mpc_delta_t,n_ctrl,"[20, 40, 80, 160]",160,extension cap (max)
+corner,flow_matching,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0, 3000.0, 9000.0, 27000.0, 81000.0, 243000.0, 729000.0]",243000.0,interior
+corner,flow_matching,mpc_delta_t,lr,"[0.01667, 0.05, 0.1, 0.15, 0.3, 0.9, 2.7]",0.05,interior
+corner,flow_matching,pnp,num_pnp_steps,"[10, 20, 50, 100, 200, 400, 800]",800,extension cap (max)
+corner,flow_matching,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",400000.0,interior
+corner,flow_matching,pnp,alpha,"[0.05, 0.1, 0.25, 0.5, 0.75, 1.0]",0.1,interior
+corner,flow_matching,flower,num_flower_steps,"[12, 25, 50, 100, 200, 500]",12,extension cap (min)
+corner,flow_matching,flower,weight,"[1.0, 10.0, 100.0, 1000.0, 10000.0, 30000.0, 90000.0, 270000.0, 810000.0, 2430000.0, 7290000.0]",7290000.0,extension cap (max)
+corner,imeanflow,rhso,NM,"[[1, 160], [2, 80], [4, 40], [8, 20]]","[2, 80]",interior
+corner,imeanflow,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.3, 0.9]",0.3,interior
+corner,imeanflow,rhso,mu,"[0.0, 0.2, 1.0]",0.0,domain bound (min)
+corner,imeanflow,dflow,num_opt_steps,"[160, 320, 640, 1280, 2560]",1280,interior
+corner,imeanflow,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3]",0.03,interior
+corner,imeanflow,mpc_rhc,K,"[1, 2, 3]",1,domain bound (min)
+corner,imeanflow,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0, 2160.0, 6480.0, 19440.0]",6480.0,interior
+corner,imeanflow,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2, 0.6]",0.2,interior
+corner,imeanflow,mpc_delta_t,num_mpc_steps,"[2, 4, 8, 16]",16,extension cap (max)
+corner,imeanflow,mpc_delta_t,n_ctrl,"[20, 40, 80, 160]",160,extension cap (max)
+corner,imeanflow,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0, 3000.0, 9000.0, 27000.0, 81000.0, 243000.0]",81000.0,interior
+corner,imeanflow,mpc_delta_t,lr,"[0.01667, 0.05, 0.1, 0.15, 0.3]",0.05,interior
+corner,imeanflow,pnp,num_pnp_steps,"[10, 20, 50, 100, 200, 400, 800]",800,extension cap (max)
+corner,imeanflow,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",400000.0,interior
+corner,imeanflow,pnp,alpha,"[0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0]",0.05,interior
+corner,imeanflow,flower,num_flower_steps,"[12, 25, 50, 100, 200, 500]",12,extension cap (min)
+corner,imeanflow,flower,weight,"[1.0, 10.0, 100.0, 1000.0, 10000.0, 30000.0, 90000.0, 270000.0, 810000.0, 2430000.0, 7290000.0]",7290000.0,extension cap (max)
+corner,meanflow_p0.5,rhso,NM,"[[2, 80], [4, 40], [8, 20]]","[4, 40]",interior
+corner,meanflow_p0.5,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1]",0.05,interior
+corner,meanflow_p0.5,rhso,mu,"[0.0, 0.2, 1.0]",0.0,domain bound (min)
+corner,meanflow_p0.5,dflow,num_opt_steps,"[160, 320, 640, 1280, 2560]",2560,extension cap (max)
+corner,meanflow_p0.5,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3]",0.1,interior
+corner,meanflow_p0.5,mpc_rhc,K,"[1, 2, 3]",1,domain bound (min)
+corner,meanflow_p0.5,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0, 2160.0, 6480.0, 19440.0, 58320.0, 175000.0, 525000.0]",525000.0,extension cap (max)
+corner,meanflow_p0.5,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2]",0.1,interior
+corner,meanflow_p0.5,mpc_delta_t,num_mpc_steps,"[2, 4, 8, 16]",8,interior
+corner,meanflow_p0.5,mpc_delta_t,n_ctrl,"[20, 40, 80, 160]",160,extension cap (max)
+corner,meanflow_p0.5,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0, 3000.0, 9000.0, 27000.0, 81000.0, 243000.0, 729000.0]",729000.0,extension cap (max)
+corner,meanflow_p0.5,mpc_delta_t,lr,"[0.01667, 0.05, 0.1, 0.15, 0.3, 0.9]",0.05,interior
+corner,meanflow_p0.5,pnp,num_pnp_steps,"[10, 20, 50, 100, 200, 400, 800]",800,extension cap (max)
+corner,meanflow_p0.5,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",400000.0,interior
+corner,meanflow_p0.5,pnp,alpha,"[0.05, 0.1, 0.25, 0.5, 0.75, 1.0]",0.1,interior
+corner,meanflow_p0.5,flower,num_flower_steps,"[12, 25, 50, 100, 200, 500]",12,extension cap (min)
+corner,meanflow_p0.5,flower,weight,"[1.0, 10.0, 100.0, 1000.0, 10000.0, 30000.0, 90000.0, 270000.0, 810000.0, 2430000.0, 7290000.0]",7290000.0,extension cap (max)
+off_edge,flow_matching,rhso,NM,"[[2, 80], [4, 40], [8, 20], [10, 16], [16, 10], [20, 8], [32, 5]]","[20, 8]",interior
+off_edge,flow_matching,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.3]",0.03,interior
+off_edge,flow_matching,rhso,mu,"[0.0, 0.2, 1.0, 3.0, 9.0, 27.0]",9.0,interior
+off_edge,flow_matching,rhso_suffix,NM,"[[4, 40], [8, 20], [10, 16], [16, 10], [20, 8]]","[16, 10]",interior
+off_edge,flow_matching,rhso_suffix,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1]",0.05,interior
+off_edge,flow_matching,rhso_suffix,mu,"[0.0, 0.2, 1.0, 3.0, 9.0]",3.0,interior
+off_edge,flow_matching,dflow,num_opt_steps,"[160, 320, 640, 1280]",640,interior
+off_edge,flow_matching,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3]",0.01,interior
+off_edge,flow_matching,mpc_rhc,K,"[1, 2, 3]",2,interior
+off_edge,flow_matching,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0]",30.0,interior
+off_edge,flow_matching,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2, 0.6, 1.8]",0.6,interior
+off_edge,flow_matching,mpc_delta_t,num_mpc_steps,"[4, 8, 16, 32]",32,extension cap (max)
+off_edge,flow_matching,mpc_delta_t,n_ctrl,"[20, 40, 80, 160]",20,extension cap (min)
+off_edge,flow_matching,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0]",180.0,interior
+off_edge,flow_matching,mpc_delta_t,lr,"[0.05, 0.1, 0.15, 0.3, 0.9]",0.3,interior
+off_edge,flow_matching,pnp,num_pnp_steps,"[10, 20, 50, 100, 200, 400, 800]",800,extension cap (max)
+off_edge,flow_matching,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",400000.0,interior
+off_edge,flow_matching,pnp,alpha,"[0.1, 0.25, 0.5, 0.75, 1.0, 2.0]",1.0,interior
+off_edge,flow_matching,flower,num_flower_steps,"[50, 100, 200, 500, 1000]",500,interior
+off_edge,flow_matching,flower,weight,"[1.0, 10.0, 100.0, 1000.0, 10000.0]",100.0,interior
+off_edge,imeanflow,rhso,NM,"[[1, 160], [2, 80], [4, 40], [8, 20], [10, 16]]","[2, 80]",interior
+off_edge,imeanflow,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.3, 0.9, 2.7]",0.9,interior
+off_edge,imeanflow,rhso,mu,"[0.0, 0.2, 1.0, 3.0]",0.2,interior
+off_edge,imeanflow,dflow,num_opt_steps,"[160, 320, 640, 1280, 2560]",2560,extension cap (max)
+off_edge,imeanflow,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3]",0.03,interior
+off_edge,imeanflow,mpc_rhc,K,"[1, 2, 3, 4]",2,interior
+off_edge,imeanflow,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0]",15.0,interior
+off_edge,imeanflow,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2, 0.6, 1.8, 5.4]",1.8,interior
+off_edge,imeanflow,mpc_delta_t,num_mpc_steps,"[4, 8, 16, 32]",16,interior
+off_edge,imeanflow,mpc_delta_t,n_ctrl,"[20, 40, 80, 160]",160,extension cap (max)
+off_edge,imeanflow,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0]",180.0,interior
+off_edge,imeanflow,mpc_delta_t,lr,"[0.05, 0.1, 0.15, 0.3, 0.9, 2.7, 8.1, 24.3]",8.1,interior
+off_edge,imeanflow,pnp,num_pnp_steps,"[10, 20, 50, 100, 200, 400, 800]",800,extension cap (max)
+off_edge,imeanflow,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",400000.0,interior
+off_edge,imeanflow,pnp,alpha,"[0.1, 0.25, 0.5, 0.75, 1.0, 2.0]",1.0,interior
+off_edge,imeanflow,flower,num_flower_steps,"[50, 100, 200, 500, 1000]",500,interior
+off_edge,imeanflow,flower,weight,"[1.0, 10.0, 100.0, 1000.0, 10000.0]",100.0,interior
+off_edge,meanflow_p0.5,rhso,NM,"[[2, 80], [4, 40], [8, 20]]","[4, 40]",interior
+off_edge,meanflow_p0.5,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.3, 0.9, 2.7]",0.9,interior
+off_edge,meanflow_p0.5,rhso,mu,"[0.0, 0.2, 1.0, 3.0]",1.0,interior
+off_edge,meanflow_p0.5,dflow,num_opt_steps,"[160, 320, 640, 1280]",640,interior
+off_edge,meanflow_p0.5,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3]",0.03,interior
+off_edge,meanflow_p0.5,mpc_rhc,K,"[1, 2, 3, 4, 5, 6, 7]",6,interior
+off_edge,meanflow_p0.5,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0]",30.0,interior
+off_edge,meanflow_p0.5,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2, 0.6, 1.8, 5.4]",1.8,interior
+off_edge,meanflow_p0.5,mpc_delta_t,num_mpc_steps,"[2, 4, 8]",4,interior
+off_edge,meanflow_p0.5,mpc_delta_t,n_ctrl,"[10, 20, 40, 80]",40,interior
+off_edge,meanflow_p0.5,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0]",30.0,interior
+off_edge,meanflow_p0.5,mpc_delta_t,lr,"[0.05, 0.1, 0.15, 0.3, 0.9, 2.7, 8.1]",2.7,interior
+off_edge,meanflow_p0.5,pnp,num_pnp_steps,"[10, 20, 50, 100, 200, 400, 800]",800,extension cap (max)
+off_edge,meanflow_p0.5,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",400000.0,interior
+off_edge,meanflow_p0.5,pnp,alpha,"[0.1, 0.25, 0.5, 0.75, 1.0, 2.0]",1.0,interior
+off_edge,meanflow_p0.5,flower,num_flower_steps,"[50, 100, 200, 500, 1000]",500,interior
+off_edge,meanflow_p0.5,flower,weight,"[1.0, 10.0, 100.0, 1000.0, 10000.0]",100.0,interior
+x_coordinate_s0.1,flow_matching,rhso,NM,"[[2, 80], [4, 40], [8, 20]]","[4, 40]",interior
+x_coordinate_s0.1,flow_matching,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1]",0.03,interior
+x_coordinate_s0.1,flow_matching,rhso,mu,"[0.0, 0.2, 1.0, 3.0]",1.0,interior
+x_coordinate_s0.1,flow_matching,rhso_suffix,NM,"[[4, 40], [8, 20], [10, 16]]","[8, 20]",interior
+x_coordinate_s0.1,flow_matching,rhso_suffix,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1]",0.03,interior
+x_coordinate_s0.1,flow_matching,rhso_suffix,mu,"[0.0, 0.2, 1.0, 3.0]",1.0,interior
+x_coordinate_s0.1,flow_matching,dflow,num_opt_steps,"[80, 160, 320, 640]",160,interior
+x_coordinate_s0.1,flow_matching,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3]",0.1,interior
+x_coordinate_s0.1,flow_matching,mpc_rhc,K,"[1, 2, 3]",2,interior
+x_coordinate_s0.1,flow_matching,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0]",240.0,interior
+x_coordinate_s0.1,flow_matching,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2]",0.1,interior
+x_coordinate_s0.1,flow_matching,mpc_delta_t,num_mpc_steps,"[2, 4, 8]",4,interior
+x_coordinate_s0.1,flow_matching,mpc_delta_t,n_ctrl,"[10, 20, 40]",20,interior
+x_coordinate_s0.1,flow_matching,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0]",540.0,interior
+x_coordinate_s0.1,flow_matching,mpc_delta_t,lr,"[0.05, 0.1, 0.15, 0.3, 0.9]",0.3,interior
+x_coordinate_s0.1,flow_matching,pnp,num_pnp_steps,"[5, 10, 20, 50, 100, 200]",10,interior
+x_coordinate_s0.1,flow_matching,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",800000.0,interior
+x_coordinate_s0.1,flow_matching,pnp,alpha,"[0.1, 0.25, 0.5, 0.75, 1.0]",0.75,interior
+x_coordinate_s0.1,flow_matching,flower,num_flower_steps,"[50, 100, 200, 500]",200,interior
+x_coordinate_s0.1,imeanflow,rhso,NM,"[[4, 40], [8, 20], [10, 16], [16, 10]]","[10, 16]",interior
+x_coordinate_s0.1,imeanflow,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1]",0.03,interior
+x_coordinate_s0.1,imeanflow,rhso,mu,"[0.0, 0.2, 1.0]",0.0,domain bound (min)
+x_coordinate_s0.1,imeanflow,dflow,num_opt_steps,"[160, 320, 640]",320,interior
+x_coordinate_s0.1,imeanflow,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3]",0.1,interior
+x_coordinate_s0.1,imeanflow,mpc_rhc,K,"[1, 2, 3, 4]",3,interior
+x_coordinate_s0.1,imeanflow,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0, 2160.0, 6480.0, 19440.0, 58320.0]",19440.0,interior
+x_coordinate_s0.1,imeanflow,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2]",0.1,interior
+x_coordinate_s0.1,imeanflow,mpc_delta_t,num_mpc_steps,"[4, 8, 16, 32]",32,extension cap (max)
+x_coordinate_s0.1,imeanflow,mpc_delta_t,n_ctrl,"[20, 40, 80, 160]",160,extension cap (max)
+x_coordinate_s0.1,imeanflow,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0, 3000.0, 9000.0, 27000.0]",9000.0,interior
+x_coordinate_s0.1,imeanflow,mpc_delta_t,lr,"[0.01667, 0.05, 0.1, 0.15, 0.3]",0.1,interior
+x_coordinate_s0.1,imeanflow,pnp,num_pnp_steps,"[10, 20, 50, 100, 200]",100,interior
+x_coordinate_s0.1,imeanflow,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",800000.0,interior
+x_coordinate_s0.1,imeanflow,pnp,alpha,"[0.1, 0.25, 0.5, 0.75, 1.0]",0.75,interior
+x_coordinate_s0.1,imeanflow,flower,num_flower_steps,"[50, 100, 200, 500]",200,interior
+x_coordinate_s0.1,meanflow_p0.5,rhso,NM,"[[4, 40], [8, 20], [10, 16]]","[8, 20]",interior
+x_coordinate_s0.1,meanflow_p0.5,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.3, 0.9]",0.3,interior
+x_coordinate_s0.1,meanflow_p0.5,rhso,mu,"[0.0, 0.2, 1.0, 3.0]",1.0,interior
+x_coordinate_s0.1,meanflow_p0.5,dflow,num_opt_steps,"[160, 320, 640]",320,interior
+x_coordinate_s0.1,meanflow_p0.5,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3, 0.9]",0.3,interior
+x_coordinate_s0.1,meanflow_p0.5,mpc_rhc,K,"[1, 2, 3, 4, 5]",4,interior
+x_coordinate_s0.1,meanflow_p0.5,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0, 2160.0]",720.0,interior
+x_coordinate_s0.1,meanflow_p0.5,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2]",0.1,interior
+x_coordinate_s0.1,meanflow_p0.5,mpc_delta_t,num_mpc_steps,"[4, 8, 16, 32]",32,extension cap (max)
+x_coordinate_s0.1,meanflow_p0.5,mpc_delta_t,n_ctrl,"[20, 40, 80, 160]",80,interior
+x_coordinate_s0.1,meanflow_p0.5,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0, 3000.0]",1000.0,interior
+x_coordinate_s0.1,meanflow_p0.5,mpc_delta_t,lr,"[0.01667, 0.05, 0.1, 0.15, 0.3, 0.9, 2.7, 8.1, 24.3]",8.1,interior
+x_coordinate_s0.1,meanflow_p0.5,pnp,num_pnp_steps,"[10, 20, 50, 100, 200]",20,interior
+x_coordinate_s0.1,meanflow_p0.5,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",800000.0,interior
+x_coordinate_s0.1,meanflow_p0.5,pnp,alpha,"[0.1, 0.25, 0.5, 0.75, 1.0]",0.5,interior
+x_coordinate_s0.1,meanflow_p0.5,flower,num_flower_steps,"[50, 100, 200, 500]",100,interior
+x_coordinate_s0.3,flow_matching,rhso,NM,"[[2, 80], [4, 40], [8, 20], [10, 16], [16, 10], [20, 8]]","[16, 10]",interior
+x_coordinate_s0.3,flow_matching,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1]",0.05,interior
+x_coordinate_s0.3,flow_matching,rhso,mu,"[0.0, 0.2, 1.0, 3.0, 9.0, 27.0]",9.0,interior
+x_coordinate_s0.3,flow_matching,rhso_suffix,NM,"[[4, 40], [8, 20], [10, 16], [16, 10]]","[10, 16]",interior
+x_coordinate_s0.3,flow_matching,rhso_suffix,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.3, 0.9]",0.3,interior
+x_coordinate_s0.3,flow_matching,rhso_suffix,mu,"[0.0, 0.2, 1.0, 3.0, 9.0, 27.0]",3.0,interior
+x_coordinate_s0.3,flow_matching,dflow,num_opt_steps,"[80, 160, 320, 640]",160,interior
+x_coordinate_s0.3,flow_matching,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3]",0.1,interior
+x_coordinate_s0.3,flow_matching,mpc_rhc,K,"[1, 2, 3]",1,domain bound (min)
+x_coordinate_s0.3,flow_matching,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0]",15.0,interior
+x_coordinate_s0.3,flow_matching,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2]",0.1,interior
+x_coordinate_s0.3,flow_matching,mpc_delta_t,num_mpc_steps,"[2, 4, 8]",4,interior
+x_coordinate_s0.3,flow_matching,mpc_delta_t,n_ctrl,"[20, 40, 80, 160]",80,interior
+x_coordinate_s0.3,flow_matching,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0]",30.0,interior
+x_coordinate_s0.3,flow_matching,mpc_delta_t,lr,"[0.01667, 0.05, 0.1, 0.15, 0.3]",0.05,interior
+x_coordinate_s0.3,flow_matching,pnp,num_pnp_steps,"[10, 20, 50, 100, 200]",20,interior
+x_coordinate_s0.3,flow_matching,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",200000.0,interior
+x_coordinate_s0.3,flow_matching,pnp,alpha,"[0.1, 0.25, 0.5, 0.75, 1.0]",0.5,interior
+x_coordinate_s0.3,flow_matching,flower,num_flower_steps,"[25, 50, 100, 200, 500]",50,interior
+x_coordinate_s0.3,imeanflow,rhso,NM,"[[1, 160], [2, 80], [4, 40], [8, 20]]","[1, 160]",domain bound (min)
+x_coordinate_s0.3,imeanflow,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.3]",0.02,interior
+x_coordinate_s0.3,imeanflow,rhso,mu,"[0.0, 0.2, 1.0, 3.0]",0.2,interior
+x_coordinate_s0.3,imeanflow,dflow,num_opt_steps,"[160, 320, 640]",320,interior
+x_coordinate_s0.3,imeanflow,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3]",0.01,interior
+x_coordinate_s0.3,imeanflow,mpc_rhc,K,"[1, 2, 3, 4, 5]",4,interior
+x_coordinate_s0.3,imeanflow,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0]",30.0,interior
+x_coordinate_s0.3,imeanflow,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2]",0.1,interior
+x_coordinate_s0.3,imeanflow,mpc_delta_t,num_mpc_steps,"[1, 2, 4, 8]",2,interior
+x_coordinate_s0.3,imeanflow,mpc_delta_t,n_ctrl,"[20, 40, 80, 160]",160,extension cap (max)
+x_coordinate_s0.3,imeanflow,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0]",10.0,interior
+x_coordinate_s0.3,imeanflow,mpc_delta_t,lr,"[0.05, 0.1, 0.15, 0.3, 0.9]",0.1,interior
+x_coordinate_s0.3,imeanflow,pnp,num_pnp_steps,"[10, 20, 50, 100, 200]",100,interior
+x_coordinate_s0.3,imeanflow,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",1200000.0,interior
+x_coordinate_s0.3,imeanflow,pnp,alpha,"[0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0]",2.0,interior
+x_coordinate_s0.3,imeanflow,flower,num_flower_steps,"[50, 100, 200, 500]",100,interior
+x_coordinate_s0.3,meanflow_p0.5,rhso,NM,"[[1, 160], [2, 80], [4, 40], [8, 20]]","[1, 160]",domain bound (min)
+x_coordinate_s0.3,meanflow_p0.5,rhso,lr,"[0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.3, 0.9]",0.3,interior
+x_coordinate_s0.3,meanflow_p0.5,rhso,mu,"[0.0, 0.2, 1.0, 3.0]",0.2,interior
+x_coordinate_s0.3,meanflow_p0.5,dflow,num_opt_steps,"[40, 80, 160, 320, 640]",40,extension cap (min)
+x_coordinate_s0.3,meanflow_p0.5,dflow,lr,"[0.003, 0.01, 0.03, 0.1, 0.3, 0.9]",0.3,interior
+x_coordinate_s0.3,meanflow_p0.5,mpc_rhc,K,"[1, 2, 3]",2,interior
+x_coordinate_s0.3,meanflow_p0.5,mpc_rhc,lam,"[5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0]",60.0,interior
+x_coordinate_s0.3,meanflow_p0.5,mpc_rhc,lr,"[0.02, 0.05, 0.1, 0.2]",0.1,interior
+x_coordinate_s0.3,meanflow_p0.5,mpc_delta_t,num_mpc_steps,"[1, 2, 4, 8]",2,interior
+x_coordinate_s0.3,meanflow_p0.5,mpc_delta_t,n_ctrl,"[20, 40, 80, 160]",160,extension cap (max)
+x_coordinate_s0.3,meanflow_p0.5,mpc_delta_t,lam,"[1.0, 3.0, 10.0, 30.0, 180.0, 360.0, 540.0, 1000.0]",30.0,interior
+x_coordinate_s0.3,meanflow_p0.5,mpc_delta_t,lr,"[0.05, 0.1, 0.15, 0.3, 0.9]",0.3,interior
+x_coordinate_s0.3,meanflow_p0.5,pnp,num_pnp_steps,"[10, 20, 50, 100, 200, 400]",200,interior
+x_coordinate_s0.3,meanflow_p0.5,pnp,gamma0_image,"[25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0]",100000.0,interior
+x_coordinate_s0.3,meanflow_p0.5,pnp,alpha,"[0.1, 0.25, 0.5, 0.75, 1.0]",0.5,interior
+x_coordinate_s0.3,meanflow_p0.5,flower,num_flower_steps,"[50, 100, 200, 500]",100,interior
