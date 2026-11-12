@@ -1834,6 +1834,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if timing_detail:
                     from src.timing import TimingDetail
                     timing = TimingDetail(adapter.spec.framework, after_load=after_load)
+                    from src.timing import attach_jax_sampler
+                    timing.jax_sampler = attach_jax_sampler(profiler)
                 run = run_job(adapter, spec, problem, manager, profiler=profiler,
                               timing=timing)
                 memory = profiler.report()

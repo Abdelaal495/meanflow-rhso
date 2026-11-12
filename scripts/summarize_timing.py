@@ -14,8 +14,12 @@ Per job (one prior, one task, one method):
   * seconds per image: mean, SD, min and max over the images, from the OUTER device-
     synchronised per-image timer when it was recorded, else the job mean (`seconds_basis`
     says which); the method's own timer is kept beside it and any disagreement is flagged;
-  * PRIMARY memory: the allocator peak (PyTorch max_memory_allocated over the timed region;
-    JAX peak_bytes_in_use of a process that ran this one configuration, with its scope);
+  * PRIMARY memory: the allocator peak.  PyTorch: max_memory_allocated over the timed
+    region, exact.  JAX: exact when peak_bytes_in_use rose during the timed region;
+    otherwise a BRACKET lower--upper, lower = the largest bytes_in_use sampled during the
+    timed region (in the NVML sampling loop), upper = peak_bytes_in_use of the
+    one-configuration process; flagged UNINFORMATIVE when the upper bound equals the
+    model-only baseline's load peak (then it was set by loading the model);
   * the NVML process figure, which is the process's RESERVED POOL plus CUDA context;
   * both also above the prior's model-only baseline (memory_baseline_<prior>.json);
   * seconds per forward-equivalent = seconds per image / (evaluations + 2 x backprops).
@@ -58,6 +62,7 @@ ROW_LABEL = dict(ROWS)
 ROW_ORDER = {key: i for i, (key, _) in enumerate(ROWS)}
 DISAGREEMENT = 0.05            # relative outer-vs-method gap that is flagged ...
 DISAGREEMENT_ABS = 0.02        # ... when it also exceeds this many seconds per image
+UNINFORMATIVE_BYTES = 2 ** 20  # JAX upper bound within 1 MiB of the model-only load peak
 
 CSV_COLUMNS = [
     "prior", "prior_name", "task", "method", "variant", "row_label", "experiment", "job_id",
@@ -65,8 +70,9 @@ CSV_COLUMNS = [
     "forward_equivalents_per_image", "seconds_per_image_mean", "seconds_per_image_sd",
     "seconds_per_image_min", "seconds_per_image_max", "seconds_per_image_values",
     "seconds_basis", "method_seconds_per_image_mean", "outer_vs_method_rel_diff",
-    "seconds_per_forward_equivalent", "allocator_peak_gib", "allocator_peak_scope",
-    "allocator_peak_source", "allocator_incremental_over_model_gib",
+    "seconds_per_forward_equivalent", "allocator_peak_gib", "allocator_peak_exact",
+    "allocator_peak_lower_gib", "allocator_peak_upper_gib", "allocator_peak_uninformative",
+    "allocator_peak_scope", "allocator_peak_source", "allocator_incremental_over_model_gib",
     "nvml_process_reserved_peak_gib", "nvml_incremental_over_model_gib",
     "model_only_allocator_gib", "model_only_nvml_reserved_gib", "gpu_name",
     "gpu_memory_total_mib", "sync_method", "jax_pool_bytes_before", "jax_pool_bytes_after",
@@ -141,8 +147,10 @@ def summarise_job(payload, baselines):
     hardware = env.get("hardware") or {}
     model = payload.get("model")
     n = max(1, int(payload.get("num_images") or 1))
-    evals = (fnum(payload.get("model_evaluations")) or 0.0) / n
-    bps = (fnum(payload.get("backprops_through_model")) or 0.0) / n
+    # The counters count BATCHED network calls, so per image means per batch chunk.
+    chunks = max(1, -(-n // max(1, int(payload.get("batch_size") or 1))))
+    evals = (fnum(payload.get("model_evaluations")) or 0.0) / chunks
+    bps = (fnum(payload.get("backprops_through_model")) or 0.0) / chunks
     fe = evals + 2.0 * bps
     values, basis, method_mean = per_image_seconds(payload)
     mean = statistics.fmean(values) if values else None
@@ -160,6 +168,23 @@ def summarise_job(payload, baselines):
     base = baselines.get(model) or {}
     base_alloc = fnum(base.get("allocator_in_use_gib"))
     base_nvml = fnum(base.get("nvml_process_reserved_gib"))
+    exact = detail.get("allocator_peak_exact")
+    if exact is None:                            # PyTorch fallback above, or older records
+        exact = scope == "timed_region"
+    lower = fnum(detail.get("allocator_peak_lower_gib"))
+    upper = fnum(detail.get("allocator_peak_upper_gib"))
+    if upper is None and alloc is not None:
+        upper = alloc
+        lower = alloc if exact else lower
+    uninformative = False
+    if not exact and upper is not None:
+        up_bytes = detail.get("allocator_peak_upper_bytes")
+        base_bytes = base.get("allocator_peak_during_load_bytes")
+        if up_bytes is not None and base_bytes is not None:
+            uninformative = abs(int(up_bytes) - int(base_bytes)) <= UNINFORMATIVE_BYTES
+        else:
+            base_peak = fnum(base.get("allocator_peak_during_load_gib"))
+            uninformative = base_peak is not None and abs(upper - base_peak) < 1e-3
     return {
         "prior": model, "prior_name": PRIOR_NAME.get(model, model),
         "task": payload.get("problem"), "method": payload.get("method"),
@@ -178,7 +203,9 @@ def summarise_job(payload, baselines):
         "outer_vs_method_rel_diff": rel,
         "seconds_per_forward_equivalent": (mean / fe if mean is not None and fe > 0 else None),
         "allocator_peak_gib": alloc, "allocator_peak_scope": scope,
-        "allocator_peak_source": source,
+        "allocator_peak_source": source, "allocator_peak_exact": bool(exact),
+        "allocator_peak_lower_gib": lower, "allocator_peak_upper_gib": upper,
+        "allocator_peak_uninformative": uninformative,
         "allocator_incremental_over_model_gib": (alloc - base_alloc
                                                  if alloc is not None and base_alloc is not None
                                                  else None),
@@ -267,6 +294,18 @@ def _cell(value, fmt, mark=""):
     return "--" if value is None else (fmt % value) + mark
 
 
+def memory_cell(r, latex=True):
+    """Exact value (PyTorch; JAX when its peak rose in the timed region) or lower--upper."""
+    if r["allocator_peak_exact"]:
+        return _cell(r["allocator_peak_gib"], "%.2f")
+    lo, hi = r["allocator_peak_lower_gib"], r["allocator_peak_upper_gib"]
+    if hi is None:
+        return "--"
+    mark = ("$^\\ast$" if latex else "*") if r["allocator_peak_uninformative"] else ""
+    return "%s%s%.2f%s" % ("?" if lo is None else "%.2f" % lo, "--" if latex else "-",
+                           hi, mark)
+
+
 def latex_table(rows, baselines, quantity, gpu, fe_unit="ms"):
     """One table in Table 29's layout: multirow prior, one row per method, one column per task."""
     if quantity == "seconds":
@@ -274,7 +313,7 @@ def latex_table(rows, baselines, quantity, gpu, fe_unit="ms"):
         label = "tab:rebuttal-runtime"
     elif quantity == "memory":
         caption = ("Peak GPU memory per job (allocator high-water mark, GiB, batch size one, "
-                   "%s)" % gpu)
+                   "%s; JAX: exact, or lower--upper bound)" % gpu)
         label = "tab:rebuttal-memory"
     else:
         unit = "milliseconds" if fe_unit == "ms" else "seconds"
@@ -302,10 +341,8 @@ def latex_table(rows, baselines, quantity, gpu, fe_unit="ms"):
                 elif quantity == "seconds":
                     cells.append(_cell(r["seconds_per_image_mean"], "%.2f"))
                 elif quantity == "memory":
-                    exact = r["allocator_peak_scope"] in (None, "timed_region")
-                    dagger = dagger or not exact
-                    cells.append(_cell(r["allocator_peak_gib"], "%.2f",
-                                       "" if exact else "$^\\dagger$"))
+                    dagger = dagger or not r["allocator_peak_exact"]
+                    cells.append(memory_cell(r))
                 else:
                     v = r["seconds_per_forward_equivalent"]
                     v = None if v is None else (v * 1000.0 if fe_unit == "ms" else v)
@@ -327,9 +364,11 @@ def latex_table(rows, baselines, quantity, gpu, fe_unit="ms"):
         lines.append("\\bottomrule")
     lines += ["\\end{tabular}", "\\end{table}"]
     if dagger:
-        lines.insert(-2, "% $^\\dagger$ JAX lifetime peak was set before the timed region "
-                         "(model load or this configuration's warm-up): the timed region "
-                         "peaked at or below it.")
+        lines.insert(-2, "% a--b: JAX bracket. a = largest bytes_in_use sampled during the "
+                         "timed region (lower bound); b = peak_bytes_in_use of the "
+                         "one-configuration process, set before the timed region (upper "
+                         "bound). $^\\ast$: b equals the model-only load peak, so it says "
+                         "nothing about the method.")
     return "\n".join(lines) + "\n"
 
 
@@ -342,7 +381,7 @@ def print_tables(rows, baselines, per_prior_gpus):
         print("  model-only baseline: allocator %s GiB in use, NVML reserved %s GiB"
               % (_cell(fnum(base.get("allocator_in_use_gib")), "%.3f"),
                  _cell(fnum(base.get("nvml_process_reserved_gib")), "%.3f")))
-        print("  %-28s %-17s %8s %7s %16s %10s %9s %9s %9s"
+        print("  %-28s %-17s %8s %7s %16s %10s %11s %9s %9s"
               % ("method", "task", "Eval.", "BP", "s/img mean+-sd", "ms/FE", "alloc GiB",
                  "+model", "NVML GiB"))
         for r in (r for r in rows if r["prior"] == prior):
@@ -350,15 +389,17 @@ def print_tables(rows, baselines, per_prior_gpus):
             timing = ("%.3f+-%.3f" % (r["seconds_per_image_mean"], sd) if sd is not None
                       else _cell(r["seconds_per_image_mean"], "%.3f") + " (job)")
             fe = r["seconds_per_forward_equivalent"]
-            print("  %-28s %-17s %8.0f %7.0f %16s %10s %9s %9s %9s%s"
+            print("  %-28s %-17s %8.0f %7.0f %16s %10s %11s %9s %9s%s"
                   % (r["row_label"].replace("$\\Delta t$", "dt"), r["task"], r["evals_per_image"],
                      r["bp_per_image"], timing, _cell(None if fe is None else fe * 1000, "%.3f"),
-                     _cell(r["allocator_peak_gib"], "%.3f"),
+                     memory_cell(r, latex=False),
                      _cell(r["allocator_incremental_over_model_gib"], "%.3f"),
                      _cell(r["nvml_process_reserved_peak_gib"], "%.3f"),
-                     "" if r["allocator_peak_scope"] in (None, "timed_region") else "  +"))
-    print("\n  + JAX lifetime peak set before the timed region (load or warm-up of the same "
-          "configuration); the timed region peaked at or below it.")
+                     "  UNINFORMATIVE" if r["allocator_peak_uninformative"] else ""))
+    print("\n  alloc GiB: exact, or lo-hi for JAX (lo = max bytes_in_use sampled in the timed "
+          "region, hi = lifetime peak_bytes_in_use of the one-configuration process).")
+    print("  UNINFORMATIVE: hi equals the model-only baseline's load peak, so it was set by "
+          "loading the model and says nothing about the method.")
     print("  NVML GiB is the process's RESERVED pool plus CUDA context, not live tensors.")
 
 

@@ -28,8 +28,12 @@ Memory
       * JAX: ``peak_bytes_in_use``, a lifetime high-water mark with no reset API.  In a
         fresh process it covers model load + warm-up + timed run of ONE configuration.
         ``allocator_peak_scope`` says which of the three set it: if the counter rose during
-        the timed region the value is that region's peak exactly; otherwise the timed region
-        peaked at or below it.
+        the timed region the value is that region's peak EXACTLY.  Otherwise it is only an
+        UPPER bound, and the LOWER bound is the largest ``bytes_in_use`` sampled during the
+        timed region -- read in the same thread and loop as the NVML samples
+        (``make_jax_sampler``), plus the snapshots on either side of the region.  When the
+        upper bound equals the model-only baseline's load peak it was set by loading the
+        model, and scripts/summarize_timing.py flags it as uninformative.
 """
 
 from __future__ import annotations
@@ -315,6 +319,80 @@ def nvml_process_gib() -> Optional[float]:
         return None
 
 
+def _jax_bytes_in_use() -> Optional[int]:
+    try:
+        import jax
+        stats = jax.local_devices()[0].memory_stats() or {}
+        value = stats.get("bytes_in_use")
+        return None if value is None else int(value)
+    except Exception:
+        return None
+
+
+def make_jax_sampler(interval: float):
+    """An NVML process sampler that ALSO reads JAX's bytes_in_use in the same loop.
+
+    One thread samples both, so the timing run adds no sampling thread of its own.  The
+    sampled bytes_in_use maximum is a LOWER bound on the timed region's allocator peak
+    (a sampler can miss a short spike); `peak_bytes_in_use` is the matching upper bound.
+    Defined lazily so importing this module never imports src.memory's NVML binding.
+    """
+    from src.memory import _NvmlSampler
+
+    class JaxStatsNvmlSampler(_NvmlSampler):
+        def __init__(self, interval_: float):
+            super().__init__(interval_)
+            self.jax_peak_bytes: Optional[int] = None
+            self.jax_samples = 0
+
+        def _record_jax(self) -> None:
+            value = _jax_bytes_in_use()
+            if value is not None:
+                self.jax_samples += 1
+                self.jax_peak_bytes = (value if self.jax_peak_bytes is None
+                                       else max(self.jax_peak_bytes, value))
+
+        def _loop(self) -> None:                       # same loop as the NVML samples
+            while not self._stop.is_set():
+                used = self._used_bytes()
+                if used is not None:
+                    self.peak_bytes = used if self.peak_bytes is None else max(
+                        self.peak_bytes, used)
+                self._record_jax()
+                self._stop.wait(self.interval)
+
+        def start(self) -> None:
+            self._record_jax()
+            super().start()
+
+        def stop(self) -> Optional[float]:
+            result = super().stop()
+            self._record_jax()
+            return result
+
+    return JaxStatsNvmlSampler(interval)
+
+
+def attach_jax_sampler(profiler: Any) -> Optional[Any]:
+    """Swap a JAX job's NVML process sampler for one that also samples bytes_in_use.
+
+    Only on GpuMemoryProfiler's JAX NVML path, where the one sampler serves both memory
+    metrics; it is built per job, so nothing carries over between jobs.  Returns the
+    sampler, or None when the profiler is on any other path (it is then left untouched).
+    """
+    if getattr(profiler, "framework", None) != "jax" or getattr(profiler, "_mode", None) != "nvml":
+        return None
+    current = getattr(profiler, "_sampler", None)
+    if current is None or getattr(profiler, "_process_sampler", None) is not current:
+        return None
+    sampler = make_jax_sampler(getattr(profiler, "nvml_interval", 0.02))
+    if not sampler.available:
+        return None
+    profiler._sampler = sampler
+    profiler._process_sampler = sampler
+    return sampler
+
+
 def memory_snapshot(framework: Optional[str]) -> Dict[str, Any]:
     device_sync(framework)
     return {"time": time.time(), "nvml_process_gib": nvml_process_gib(),
@@ -337,6 +415,8 @@ class TimingDetail:
                  after_load: Optional[Dict[str, Any]] = None):
         self.framework = framework
         self.timer = ChunkTimer(framework)
+        # Set by run.py from attach_jax_sampler(profiler) on the JAX NVML path.
+        self.jax_sampler: Optional[Any] = None
         self.snapshots: Dict[str, Optional[Dict[str, Any]]] = {
             "after_model_load": after_load, "before_timed_region": None,
             "after_timed_region": None}
@@ -348,11 +428,15 @@ class TimingDetail:
         """The PRIMARY memory figure, with the scope it is valid for."""
         if self.framework == "torch":
             exact = memory.get("gpu_memory_source") == "torch.cuda.max_memory_allocated"
-            return {"allocator_peak_gib": memory.get("gpu_peak_gib") if exact else None,
+            value = memory.get("gpu_peak_gib") if exact else None
+            return {"allocator_peak_gib": value,
                     "allocator_baseline_gib": memory.get("gpu_baseline_gib") if exact else None,
                     "allocator_peak_source": ("torch.cuda.max_memory_allocated" if exact
                                               else "unavailable"),
-                    "allocator_peak_scope": "timed_region" if exact else None}
+                    "allocator_peak_scope": "timed_region" if exact else None,
+                    "allocator_peak_exact": bool(exact),
+                    "allocator_peak_lower_gib": value, "allocator_peak_upper_gib": value,
+                    "allocator_peak_upper_bytes": None, "jax_bytes_in_use_samples": 0}
         if self.framework == "jax":
             post = _jax_field(self.snapshots["after_timed_region"], "peak_bytes_in_use")
             pre = _jax_field(self.snapshots["before_timed_region"], "peak_bytes_in_use")
@@ -360,19 +444,41 @@ class TimingDetail:
             if post is None:
                 return {"allocator_peak_gib": None, "allocator_baseline_gib": None,
                         "allocator_peak_source": "unavailable (jax memory_stats() is None)",
-                        "allocator_peak_scope": None}
+                        "allocator_peak_scope": None, "allocator_peak_exact": False,
+                        "allocator_peak_lower_gib": None, "allocator_peak_upper_gib": None,
+                        "allocator_peak_upper_bytes": None, "jax_bytes_in_use_samples": 0}
+            # LOWER bound: the largest bytes_in_use seen during the timed region -- sampled
+            # in the NVML loop, plus the two snapshots that bracket it.  A sampler can miss
+            # a short spike, so the true peak can only be higher.
+            seen = [v for v in (
+                getattr(self.jax_sampler, "jax_peak_bytes", None),
+                _jax_field(self.snapshots["before_timed_region"], "bytes_in_use"),
+                _jax_field(self.snapshots["after_timed_region"], "bytes_in_use"))
+                if v is not None]
+            lower = max(seen) if seen else None
+            # UPPER bound: the lifetime peak of this one-configuration process.  If it ROSE
+            # during the timed region, the new maximum was reached there: exact.
             if pre is None or post > pre:
-                scope = "timed_region"
+                scope, exact = "timed_region", pre is not None
             elif load is None or pre > load:
-                scope = "warm_up_of_this_configuration (timed region <= this)"
+                scope, exact = "warm_up_of_this_configuration (timed region <= this)", False
             else:
-                scope = "model_load (timed region <= this)"
+                scope, exact = "model_load (timed region <= this)", False
+            if exact:
+                lower = post
             return {"allocator_peak_gib": _gib(post),
                     "allocator_baseline_gib": _gib(_jax_field(
                         self.snapshots["before_timed_region"], "bytes_in_use")),
-                    "allocator_peak_source": "jax memory_stats()['peak_bytes_in_use'] "
-                                             "(lifetime of this one-configuration process)",
-                    "allocator_peak_scope": scope}
+                    "allocator_peak_source": "jax memory_stats(): lower = max sampled "
+                                             "bytes_in_use in the timed region, upper = "
+                                             "peak_bytes_in_use (lifetime of this "
+                                             "one-configuration process)",
+                    "allocator_peak_scope": scope, "allocator_peak_exact": exact,
+                    "allocator_peak_lower_gib": _gib(lower),
+                    "allocator_peak_upper_gib": _gib(post),
+                    "allocator_peak_upper_bytes": int(post),
+                    "jax_bytes_in_use_samples": int(getattr(self.jax_sampler,
+                                                            "jax_samples", 0) or 0)}
         return {"allocator_peak_gib": None, "allocator_baseline_gib": None,
                 "allocator_peak_source": "unavailable", "allocator_peak_scope": None}
 
@@ -407,6 +513,9 @@ def model_only_baseline(adapter: Any, model: str) -> Dict[str, Any]:
     return {"model": model, "framework": framework,
             "allocator_in_use_gib": _gib(allocated),
             "allocator_peak_during_load_gib": _gib(
+                torch_stats.get("max_memory_allocated") if framework == "torch"
+                else jax_stats.get("peak_bytes_in_use")),
+            "allocator_peak_during_load_bytes": (
                 torch_stats.get("max_memory_allocated") if framework == "torch"
                 else jax_stats.get("peak_bytes_in_use")),
             "nvml_process_reserved_gib": snap.get("nvml_process_gib"),

@@ -125,18 +125,30 @@ on an internally inconsistent benchmark. Aggregate sharded runs (`run.py --aggre
 
 ```bash
 python scripts/make_timing_config.py            # writes configs/experiments_rebuttal_timing_<prior>[_smoke].yaml
-python scripts/run_timing.py --config configs/experiments_rebuttal_timing_pmf_smoke.yaml     --run-id timing_pmf_smoke --with-checks      # smoke, same GPU type
+python scripts/run_timing.py --config configs/experiments_rebuttal_timing_pmf.yaml \
+    --run-id timing_pmf --estimate                # wall-clock estimate and suggested --time
+python scripts/run_timing.py --config configs/experiments_rebuttal_timing_pmf_smoke.yaml \
+    --run-id timing_pmf_smoke --with-checks       # smoke, same GPU type
 python scripts/run_timing.py --config configs/experiments_rebuttal_timing_pmf.yaml --run-id timing_pmf
 python scripts/summarize_timing.py outputs/timing_pmf outputs/timing_jit outputs/timing_imf outputs/timing_sit
 ```
 
-On the cluster, `sbatch --export=ALL,PRIOR=pmf slurm/run_timing.sh` runs one prior on one
-GPU. Each configuration gets its own process, because a framework never returns reserved GPU
+On the cluster, `bash submit_timing.sh <prior> --time HH:MM:SS [--smoke]` submits
+`slurm/run_timing.sh` for one prior on one GPU. Like `submit.sh` it takes the account, memory
+and CPUs from `cluster.env`; the GPU defaults to `a100:1` (Table 29's A100-SXM4-40GB),
+overridable with `MPCFLOW_TIMING_GPU` or `--gpu`. The run id is stable (`timing_<prior>`), and
+`run_timing.py` skips every configuration already complete in the run directory, so
+resubmitting the same command after a timeout runs only what is left.
+
+Each configuration gets its own process, because a framework never returns reserved GPU
 memory while its process lives: in a long multi-job process the NVML number of a job is the
 pool left by every job before it. The driver sets `XLA_PYTHON_CLIENT_ALLOCATOR=bfc` and
 `XLA_PYTHON_CLIENT_PREALLOCATE=false` for its child processes only. The primary memory
-figure is the allocator peak (PyTorch `max_memory_allocated` over the timed region; JAX
-`peak_bytes_in_use` of a process that ran one configuration, with the scope it is valid for);
-the NVML figure is the process's reserved pool plus CUDA context. `runtime.timing_detail: true`
-(src/timing.py) adds a device-synchronised per-image timer and allocator, pool, hardware and
-version records to each job's `metadata.json`; results.csv is unchanged.
+figure is the allocator peak: PyTorch `max_memory_allocated` over the timed region, exact;
+JAX exact when `peak_bytes_in_use` rose during the timed region, otherwise a bracket from the
+largest `bytes_in_use` sampled during the region (sampled in the NVML loop) to the process's
+lifetime `peak_bytes_in_use`, flagged uninformative when that upper bound equals the
+model-only baseline's load peak. The NVML figure is the process's reserved pool plus CUDA
+context. `runtime.timing_detail: true` (src/timing.py) adds a device-synchronised per-image
+timer and allocator, pool, hardware and version records to each job's `metadata.json`;
+results.csv is unchanged.

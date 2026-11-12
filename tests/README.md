@@ -184,8 +184,11 @@ one job at batch size 1 that equals its frozen source entry in every non-identit
 every source entry is covered exactly once; `runtime.timing_detail` is opt-in; the
 synchronised per-image timer, the JAX allocator-peak scope rule and the hardware records work;
 `run_job` returns bit-identical pixels with and without the timing detail; the driver runs a
-model-only baseline, one process per block and an aggregate; and `summarize_timing.py` builds
-the three Table 29-style tables from synthetic runs.
+model-only baseline, one process per block and an aggregate, skips blocks already complete in
+the run directory (and only those), and estimates the wall-clock from logged runs; the JAX
+memory bracket (sampled `bytes_in_use` lower bound, lifetime peak upper bound) is computed and
+sampled in the NVML loop; and `summarize_timing.py` builds the three Table 29-style tables
+from synthetic runs, with the bracket and the uninformative flag in the memory table.
 
 `test_matched_configs.py`, `test_hpo_lock.py` and `test_paired_stats.py` cover the
 matched-budget comparison of RHSO and MPC-Δt (rebuttal Task 2). The first resolves the

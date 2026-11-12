@@ -355,14 +355,19 @@ def check_run_job():
           and plain["stats"].model_evals_total == timed["stats"].model_evals_total)
 
 
+def _driver_args(cfg, run_id, output_root=None):
+    import argparse
+    return argparse.Namespace(config=cfg, run_id=run_id, output_root=output_root,
+                              cache_root=None, num_images=None, experiments=None,
+                              with_checks=False, python="python")
+
+
 def check_driver():
     print("\n[9] scripts/run_timing.py")
     cfg = mtc.out_path("pmf")
-    args = rt_driver.main.__globals__["argparse"].Namespace(
-        config=cfg, run_id="timing_pmf", output_root=None, cache_root=None, num_images=None,
-        experiments=None, with_checks=False, python="python")
-    cmds = rt_driver.build_commands(args)
+    args = _driver_args(cfg, "timing_pmf")
     blocks = list(yaml.safe_load((REPO_ROOT / cfg).read_text())["experiments"])
+    cmds = rt_driver.build_commands(args, blocks)
     labels = [label for label, _ in cmds]
     per_block = cmds[1:-1]
     check("model-only baseline first, one process per block, aggregate last",
@@ -379,16 +384,198 @@ def check_driver():
     check("children get the pooling allocator without preallocation; parent untouched",
           env["XLA_PYTHON_CLIENT_ALLOCATOR"] == "bfc"
           and env["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false" and dict(os.environ) == before)
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        code = rt_driver.main(["--config", cfg, "--run-id", "x", "--dry-run"])
-    check("--dry-run prints the commands and runs nothing", code == 0
-          and out.getvalue().count("run.py") == len(cmds))
+    with tempfile.TemporaryDirectory() as tmp:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = rt_driver.main(["--config", cfg, "--run-id", "x", "--output-root", tmp,
+                                   "--dry-run"])
+        check("--dry-run prints the commands and runs nothing", code == 0
+              and out.getvalue().count("run.py") == len(cmds)
+              and not (Path(tmp) / "x" / "timing_logs").exists())
+
+
+def _finish(run_dir, spec, with_timing=True):
+    """Write a job the way run.persist_job does (metadata.json + results.npz)."""
+    import numpy as np
+    import run
+    from src.utils import jsonable
+    out = run.job_dir_for(Path(run_dir), spec)
+    out.mkdir(parents=True, exist_ok=True)
+    payload = {"job_id": spec.job_id, "status": "ok", "experiment": spec.experiment,
+               "resolved_spec": jsonable(spec.to_dict())}
+    if with_timing:
+        payload["timing_detail"] = {"chunk_seconds_outer_synced": [1.0, 1.0, 1.0]}
+    (out / "metadata.json").write_text(json.dumps(payload))
+    np.savez_compressed(out / "results.npz", reconstruction=np.zeros((3, 2, 2, 3), np.uint8))
+
+
+def check_resume():
+    print("\n[9b] run_timing.py resumes: completed configurations are skipped")
+    cfg = mtc.out_path("pmf")
+    with tempfile.TemporaryDirectory() as tmp:
+        args = _driver_args(cfg, "timing_pmf", output_root=tmp)
+        plan, run_dir, by_block, timing_on = rt_driver.resolve(args)
+        names = list(by_block)
+        first, second, third = (by_block[n] for n in names[:3])
+        _finish(run_dir, first)
+        _finish(run_dir, second, with_timing=False)            # an old run without timing
+        wrong = dataclasses.replace(third, num_opt_steps=(third.num_opt_steps or 0) + 1,
+                                    steps=(third.steps or 0) + 1)
+        _finish(run_dir, wrong)                                  # a different configuration
+        check("run dir is <output root>/<run id>, as run.py resolves it",
+              Path(run_dir) == (Path(tmp) / "timing_pmf").resolve() and timing_on)
+        check("complete = run.py's resume test passes and timing_detail is present",
+              rt_driver.is_complete(run_dir, first, True)
+              and not rt_driver.is_complete(run_dir, second, True)
+              and not rt_driver.is_complete(run_dir, third, True))
+        (Path(run_dir) / "memory_baseline_pmf.json").write_text("{}")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rt_driver.main(["--config", cfg, "--run-id", "timing_pmf", "--output-root", tmp,
+                            "--dry-run"])
+        text = out.getvalue()
+        listed = re.findall(r"^  \[(\S+)\] ", text, re.MULTILINE)
+        check("a resubmission runs only what is left, then aggregates",
+              "1 already complete (skipped), %d to run" % (len(names) - 1) in text
+              and names[0] not in listed and names[1] in listed and names[2] in listed
+              and listed[-1] == "aggregate" and "model_only_baseline" not in listed)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rt_driver.main(["--config", cfg, "--run-id", "timing_pmf", "--output-root", tmp,
+                            "--dry-run", "--rerun-all"])
+        listed = re.findall(r"^  \[(\S+)\] ", out.getvalue(), re.MULTILINE)
+        check("--rerun-all runs everything again",
+              listed[0] == "model_only_baseline" and names[0] in listed)
+    run_sh = (REPO_ROOT / "slurm" / "run_timing.sh").read_text()
+    submit = (REPO_ROOT / "submit_timing.sh").read_text()
+    check("the Slurm run id is stable across resubmissions",
+          "SLURM_JOB_ID}\"" not in run_sh.split("RUN_ID=")[1].split("\n")[0]
+          and 'RUN_ID="${TIMING_RUN_ID:-timing_${PRIOR}}"' in run_sh
+          and "TIMING_RUN_ID=" in submit and ". ./cluster.env" in submit)
+
+
+def check_estimate():
+    print("\n[9c] run_timing.py wall-clock estimate")
+    cfg = mtc.out_path("pmf")
+    plan, _, by_block, _ = rt_driver.resolve(_driver_args(cfg, "est"))
+    sdedit, dflow = by_block["denoising__core__sdedit"], by_block["denoising__core__dflow"]
+    pnp = by_block["denoising__core__pnp"]
+    fields = ["status", "model", "num_images", "batch_size", "runtime", "runtime_per_image",
+              "model_evaluations", "backprops_through_model", "warmup_seconds",
+              "model_load_seconds"] + list(rt_driver.COST_FIELDS)
+
+    def row(spec_like, runtime, evals, bps, n=100, bs=10, **over):
+        r = {k: getattr(spec_like, k, None) for k in rt_driver.COST_FIELDS}
+        r.update(over)
+        r.update(status="ok", model="pmf", num_images=n, batch_size=bs, runtime=runtime,
+                 runtime_per_image=runtime / n, model_evaluations=evals,
+                 backprops_through_model=bps, warmup_seconds=2.0, model_load_seconds=50.0)
+        return r
+
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "run_1"
+        d.mkdir()
+        with open(d / "results.csv", "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=fields)
+            w.writeheader()
+            w.writerow(row(sdedit, 1.0, 20, 0))                  # 2 evals per batched call
+            w.writerow(row(pnp, 10.0, 110, 0))                   # 11 per call
+            w.writerow(row(pnp, 5000.0, 500, 0, problem="deblur", method="flower",
+                           num_flower_steps=50))                 # CG-dominated
+        refs = rt_driver.load_reference([tmp])
+    sd = next(r for r in refs if r["key"][1] == "sdedit")
+    check("logged rows: counters per batched call, image bracket [batched, whole batch]",
+          len(refs) == 3 and abs(sd["t_lo"] - 0.01) < 1e-12 and abs(sd["t_hi"] - 0.1) < 1e-12
+          and abs(sd["spfe_lo"] - 0.005) < 1e-12)
+    est = rt_driver.estimate([sdedit, dflow], refs, overhead=30.0, jax_compile=10.0,
+                             include_baseline=True)["pmf"]
+    blocks = {b[0]: b for b in est["blocks"]}
+    _, basis, fe, t_lo, t_hi, lo, hi = blocks["denoising__core__sdedit"]
+    check("a logged configuration is bracketed by its own job",
+          basis == "logged job" and abs(lo - (30 + 50 + 2 + 10 + 3 * 0.01)) < 1e-9
+          and abs(hi - (30 + 50 + 2 + 10 + 3 * 0.1)) < 1e-9)
+    # median of sdedit (0.01 s / 2 FE) and pnp (0.1 s / 11 FE); with Flower (1.0 s/FE) in
+    # the pool the median would be pnp's 0.1 / 11 instead.
+    pool_lo = (0.01 / 2 + 0.1 / 11) / 2
+    _, basis, fe, t_lo, _, _, _ = blocks["denoising__core__dflow"]
+    check("an unlogged method is extrapolated from the prior's s/FE, Flower excluded",
+          basis == "s/FE" and abs(t_lo - fe * pool_lo) < 1e-9)
+    check("totals include the baseline and aggregate processes",
+          abs(est["lower_s"] - (sum(b[5] for b in est["blocks"]) + 30 + 50 + 30)) < 1e-9)
+    none = rt_driver.estimate([sdedit], [], 30.0, 10.0, True)["pmf"]
+    forced = rt_driver.estimate([sdedit], [], 30.0, 10.0, True, {"pmf": 0.01})["pmf"]
+    check("no logged job -> no estimate, unless --seconds-per-fe is given",
+          not none["ok"] and forced["ok"] and forced["upper_s"] > 0)
+    check("suggested Slurm limit rounds up to 15 minutes",
+          rt_driver.suggested_limit(3600, 1.0) == "01:00:00"
+          and rt_driver.suggested_limit(3601, 1.0) == "01:15:00")
+
+
+def check_bracket():
+    print("\n[9d] JAX memory bracket")
+    import types
+    import time as _time
+    from src import timing
+    g = 1 << 30
+
+    def snap(peak, in_use):
+        return {"jax": {"peak_bytes_in_use": peak, "bytes_in_use": in_use},
+                "torch": None, "nvml_process_gib": None}
+
+    td = timing.TimingDetail("jax", after_load=snap(4 * g, g))
+    td.snapshots["before_timed_region"] = snap(4 * g, g)
+    td.snapshots["after_timed_region"] = snap(4 * g, int(1.2 * g))
+    td.jax_sampler = types.SimpleNamespace(jax_peak_bytes=int(2.5 * g), jax_samples=7)
+    rep = td.allocator_peak({})
+    check("peak set at load: bracket [sampled bytes_in_use, lifetime peak]",
+          not rep["allocator_peak_exact"] and rep["allocator_peak_lower_gib"] == 2.5
+          and rep["allocator_peak_upper_gib"] == 4.0 and rep["jax_bytes_in_use_samples"] == 7
+          and rep["allocator_peak_upper_bytes"] == 4 * g)
+    td.snapshots["after_timed_region"] = snap(5 * g, g)
+    rep = td.allocator_peak({})
+    check("peak rose in the timed region: exact, lower = upper",
+          rep["allocator_peak_exact"] and rep["allocator_peak_lower_gib"] == 5.0
+          and rep["allocator_peak_upper_gib"] == 5.0)
+
+    import threading
+    lock, counter = threading.Lock(), [0]
+
+    def fake_in_use():                         # called from the sampler thread AND this one
+        with lock:
+            counter[0] += 100
+            return counter[0]
+
+    saved = timing._jax_bytes_in_use
+    timing._jax_bytes_in_use = fake_in_use
+    try:
+        sampler = timing.make_jax_sampler(0.002)
+        sampler.start()
+        until = _time.perf_counter() + 0.05
+        while _time.perf_counter() < until:
+            pass
+        sampler.stop()
+    finally:
+        timing._jax_bytes_in_use = saved
+    check("the NVML loop also samples bytes_in_use (max kept)",
+          sampler.jax_samples >= 2 and sampler.jax_peak_bytes == 100 * sampler.jax_samples,
+          "%d samples" % sampler.jax_samples)
+    torch_prof = types.SimpleNamespace(framework="torch", _mode="torch_cuda", _sampler=None,
+                                       _process_sampler=None)
+    original = object()
+    jax_prof = types.SimpleNamespace(framework="jax", _mode="nvml", _sampler=original,
+                                     _process_sampler=original, nvml_interval=0.02)
+    attached = timing.attach_jax_sampler(jax_prof)
+    check("attached only on the JAX NVML path; one sampler serves both metrics",
+          timing.attach_jax_sampler(torch_prof) is None and torch_prof._sampler is None
+          and ((attached is None and jax_prof._sampler is original)
+               or (attached is jax_prof._sampler is jax_prof._process_sampler)),
+          "NVML %s here" % ("available" if attached is not None else "unavailable"))
 
 
 # =====================================================================================
 def _job(model, problem, method, experiment, values, evals, bps, peak, scope="timed_region",
-         gpu="NVIDIA A100-SXM4-40GB", nvml=10.0, detail=True):
+         gpu="NVIDIA A100-SXM4-40GB", nvml=10.0, detail=True, bracket=None):
+    """`bracket` = (lower GiB, upper GiB, upper bytes) for a non-exact JAX peak."""
     payload = {"job_id": "%s_%s_%s_%s" % (model, problem, method, experiment),
                "model": model, "problem": problem, "method": method, "experiment": experiment,
                "status": "ok", "num_images": len(values), "batch_size": 1,
@@ -402,20 +589,28 @@ def _job(model, problem, method, experiment, values, evals, bps, peak, scope="ti
             "chunk_seconds_outer_synced": values, "chunk_seconds_method": values,
             "chunk_sizes": [1] * len(values), "allocator_peak_gib": peak,
             "allocator_peak_scope": scope, "allocator_peak_source": "test",
+            "allocator_peak_exact": bracket is None,
+            "allocator_peak_lower_gib": bracket[0] if bracket else peak,
+            "allocator_peak_upper_gib": bracket[1] if bracket else peak,
+            "allocator_peak_upper_bytes": bracket[2] if bracket else None,
             "sync_method": "test",
             "environment": {"hardware": {"gpu_name": gpu, "gpu_memory_total_mib": 40960}}}
     return payload
 
 
 def _write_run(root, name, jobs, baselines):
+    """baselines: {model: (allocator in use GiB, NVML GiB[, load peak bytes])}."""
     run_dir = Path(root) / name
     for job in jobs:
         d = run_dir / job["experiment"] / job["model"] / job["method"] / "leaf"
         d.mkdir(parents=True, exist_ok=True)
         (d / "metadata.json").write_text(json.dumps(job))
-    for model, (alloc, nvml) in baselines.items():
-        (run_dir / ("memory_baseline_%s.json" % model)).write_text(json.dumps(
-            {"model": model, "allocator_in_use_gib": alloc, "nvml_process_reserved_gib": nvml}))
+    for model, values in baselines.items():
+        payload = {"model": model, "allocator_in_use_gib": values[0],
+                   "nvml_process_reserved_gib": values[1]}
+        if len(values) > 2:
+            payload["allocator_peak_during_load_bytes"] = values[2]
+        (run_dir / ("memory_baseline_%s.json" % model)).write_text(json.dumps(payload))
     return str(run_dir)
 
 
@@ -425,19 +620,25 @@ def check_summary():
     exps = ["denoising", "deblurring", "super_resolution", "random_inpainting", "box_inpainting"]
     means = [12.97, 17.98, 13.23, 13.19, 14.01]
     with tempfile.TemporaryDirectory() as tmp:
+        g = 1 << 30
         pmf_jobs = []
         for task, exp, m in zip(tasks, exps, means):
+            # deblur: peak set at model load and EQUAL to the baseline's load peak
+            # (uninformative); super-resolution: set during warm-up (an ordinary bracket).
+            bracket = {"deblur": (2.1, 3.0, 3 * g),
+                       "super_resolution": (2.2, 3.5, int(3.5 * g))}.get(task)
             pmf_jobs.append(_job("pmf", task, "rhso", exp + "__rhso", [m - 0.1, m, m + 0.1],
-                                 160, 160, 3.0, scope=("timed_region" if task != "deblur"
-                                                       else "model_load (timed region <= this)")))
+                                 160, 160, 3.0, scope="timed_region", bracket=bracket))
             pmf_jobs.append(_job("pmf", task, "rhso", exp + "__rhso_matched", [m / 2] * 3,
                                  140, 140, 2.5))
             pmf_jobs.append(_job("pmf", task, "sdedit", exp + "__core", [0.03] * 3, 2, 0, 1.2))
-        pmf_jobs.append(_job("pmf", "denoising", "pnp", "denoising__core", [1.0], 10, 0, 1.5,
-                             detail=False))
+        legacy = _job("pmf", "denoising", "pnp", "denoising__core", [1.0] * 4, 10, 0, 1.5,
+                      detail=False)
+        legacy.update(batch_size=2, model_evaluations=20, backprops_through_model=0)
+        pmf_jobs.append(legacy)                    # batched: 2 calls of 10 evals each
         jit_jobs = [_job("jit", "denoising", "rhso", "denoising__rhso", [2.0, 2.2, 2.4], 320, 160,
                          4.0, gpu="NVIDIA A100-SXM4-40GB")]
-        runs = [_write_run(tmp, "timing_pmf", pmf_jobs, {"pmf": (1.0, 2.0)}),
+        runs = [_write_run(tmp, "timing_pmf", pmf_jobs, {"pmf": (1.0, 2.0, 3 * g)}),
                 _write_run(tmp, "timing_jit", jit_jobs, {"jit": (0.5, 1.0)})]
         out = Path(tmp) / "summary"
         buf = io.StringIO()
@@ -462,6 +663,17 @@ def check_summary():
         job_mean = next(r for r in rows if r["method"] == "pnp")
         check("no per-image times -> the job mean, labelled",
               job_mean["seconds_basis"] == "job_mean" and job_mean["seconds_per_image_sd"] == "")
+        check("Eval./BP per image = counters / batch chunks (counters are per batched call)",
+              float(job_mean["evals_per_image"]) == 10.0)
+        deb = next(r for r in rows if r["prior"] == "pmf" and r["task"] == "deblur"
+                   and r["variant"] == "base" and r["method"] == "rhso")
+        sr = next(r for r in rows if r["prior"] == "pmf" and r["task"] == "super_resolution"
+                  and r["variant"] == "base" and r["method"] == "rhso")
+        check("JAX bracket flagged uninformative only when upper = model-only load peak",
+              deb["allocator_peak_uninformative"] == "True"
+              and sr["allocator_peak_uninformative"] == "False"
+              and deb["allocator_peak_exact"] == "False" and r["allocator_peak_exact"] == "True"
+              and "UNINFORMATIVE" in text)
         pmf_spread = next(s for s in spread if s["prior"] == "pmf")
         fe_values = [float(r["seconds_per_forward_equivalent"]) for r in rows if r["prior"] == "pmf"]
         check("per-prior spread of seconds per forward-equivalent",
@@ -474,7 +686,9 @@ def check_summary():
               "\\caption{Runtime per image (seconds/image, batch size one, A100-SXM4-40GB)}" in tex)
         check("three tables: seconds, allocator memory with model-only row, forward-equivalents",
               tex.count("\\begin{table}") == 3 and "Model only & \\multicolumn{5}{c}{1.00}" in tex
-              and "3.00$^\\dagger$" in tex and "RHSO (matched BP)" in tex)
+              and "RHSO (matched BP)" in tex)
+        check("memory table: exact values, and lower--upper with the uninformative mark",
+              " & RHSO & 3.00 & 2.10--3.00$^\\ast$ & 2.20--3.50 & 3.00 & 3.00 \\\\" in tex)
         check("GPU name printed per prior, no warning when all match",
               "GPU: NVIDIA A100-SXM4-40GB" in text and "DIFFERENT GPU" not in text)
 
@@ -494,6 +708,9 @@ def main():
     check_timing_module()
     check_run_job()
     check_driver()
+    check_resume()
+    check_estimate()
+    check_bracket()
     check_summary()
     total = PASSED[0] + len(FAILED)
     print("\n%d/%d checks passed" % (PASSED[0], total))

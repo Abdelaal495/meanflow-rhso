@@ -2,8 +2,12 @@
 # =====================================================================================
 # Rebuttal Task 1: timing and peak memory for ONE prior on ONE exclusive GPU.
 #
-#     sbatch --account=def-YOURPI --gpus-per-node=a100:1 --export=ALL,PRIOR=pmf slurm/run_timing.sh
-#     sbatch ... --export=ALL,PRIOR=pmf,SMOKE=1 slurm/run_timing.sh     # 2-image smoke, with checks
+# Submit it with submit_timing.sh, which reads cluster.env exactly as submit.sh does:
+#
+#     bash submit_timing.sh pmf --time 04:00:00
+#     bash submit_timing.sh pmf --smoke --time 03:00:00     # 2-image smoke, with checks
+#
+# The #SBATCH lines below are only fallbacks; submit_timing.sh overrides them with flags.
 #
 # Use the SAME GPU type for all four priors (A100-SXM4-40GB, as in Table 29); every job
 # records the GPU name and scripts/summarize_timing.py warns if they differ.  Each
@@ -24,13 +28,15 @@ mkdir -p logs
 source activate_cluster.sh                # written by setup_cluster.sh
 
 PRIOR="${PRIOR:?set PRIOR=pmf|jit|imf|sit}"
+# The run id is STABLE (not the Slurm job id), so a job resubmitted after a timeout lands in
+# the same run directory and scripts/run_timing.py skips every configuration already done.
 if [ "${SMOKE:-0}" = "1" ]; then
   CONFIG="configs/experiments_rebuttal_timing_${PRIOR}_smoke.yaml"
-  RUN_ID="timing_${PRIOR}_smoke_${SLURM_JOB_ID}"
+  RUN_ID="${TIMING_RUN_ID:-timing_${PRIOR}_smoke}"
   EXTRA=(--with-checks)
 else
   CONFIG="configs/experiments_rebuttal_timing_${PRIOR}.yaml"
-  RUN_ID="timing_${PRIOR}_${SLURM_JOB_ID}"
+  RUN_ID="${TIMING_RUN_ID:-timing_${PRIOR}}"
   EXTRA=()
 fi
 
