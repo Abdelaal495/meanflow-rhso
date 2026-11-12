@@ -74,3 +74,30 @@ uses the hexagon study below. What exists:
 - `toy/gmm_stage2.py`: tuning on 64 problems x 4 seeds over the pMF grids, test on
   512 x 16, metrics against the exact posterior, CSV / LaTeX / figures
   (`python toy/gmm_stage2.py --block oracle [--smoke]`).
+
+## Hexagon study: `toy/hexagon_study.py` (rebuttal Task 4)
+
+Modelled on the toy of MPC-Flow (Webber et al., 2026, Appendix C): data uniform on the
+boundary of a regular hexagon with side 2, centred, flat lower edge, with N(0, 0.02^2 I)
+jitter.
+
+```bash
+python -u toy/hexagon_study.py train --model flow_matching   # one prior per run, on the GPU (cached)
+python -u toy/hexagon_study.py train --model meanflow_p0
+python -u toy/hexagon_study.py train --model meanflow_p0.5
+python -u toy/hexagon_study.py stage1                         # sanity table from the cached priors
+```
+
+The study runs on CUDA only (`--device cuda`, the default): it stops at once when CUDA is
+missing or a test forward + backward fails, and exits with the traceback on any error rather
+than hanging. Training prints a progress line every 1,000 steps (step, loss, elapsed time)
+and writes the same lines to `outputs/hexagon_study/train_<model>.log`.
+
+A flow-matching and a MeanFlow prior share the 2-D MLP of `toy/common.py` (width 256,
+depth 4) and one recipe (30k steps, batch 1024, Adam 3e-4, warm-up + cosine, EMA 0.999).
+MeanFlow is trained with the MeanFlow objective at adaptive-weight exponents p = 0 and 0.5.
+Stage 1 writes `outputs/hexagon_study/stage1/` (`sanity.csv`, `sanity.json`, `samples.png`,
+`training_curves.png`). The table reports sliced W2 to the data against the two-sample floor,
+and the distribution of distances to the hexagon for flow-matching Heun-100 and MeanFlow
+with 1, 2 and 8 steps. It also covers the jumps T(x_t; t -> 1) from the true marginal at
+t = 0.25, 0.5, 0.75, next to flow-matching Heun from the same x_t.

@@ -19,6 +19,7 @@ python tests/test_flower.py                 # needs jax + pyyaml (+ torch for th
 python tests/test_fingerprints.py           # needs jax + pyyaml (imports run.py)
 python tests/test_gmm_study.py             # needs torch + git (no trained model)
 python tests/test_gmm_solvers.py           # needs torch (no trained model)
+python tests/test_hexagon_study.py         # needs torch (no trained model)
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -248,6 +249,12 @@ backprop through the map against finite differences; the per-row Adam against
 torch.optim.Adam; that no solver lets rows interact; the cost counts (RHSO against
 `src.rhso.rhso_cost_estimate`); Flower's exact refinement; and that one-step Euler D-Flow
 on the exact velocity collapses to E[x1].
+
+`test_hexagon_study.py` covers the hexagon study's data and metrics: the hexagon is regular
+with side 2, centred, with the lower-right corner at (1, -sqrt 3); the distance to the
+hexagon is exact on known points and matches a dense polyline; the data is uniform in arc
+length, and its distance to the hexagon follows the 0.02 jitter; sliced W2 is correct on a
+known Gaussian pair.
 
 ## What these tests do NOT cover
 
