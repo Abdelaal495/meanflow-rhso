@@ -25,7 +25,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
+
+from common import MeanFlowMLP, TimeFeatures, VelocityMLP, train_meanflow  # noqa: F401
 
 DEVICE = "cpu"
 DATA_NOISE = 0.0          # jitter on the moons; 0 = pure curves, like MPC-Flow's hexagon
@@ -58,103 +59,13 @@ def moon_point(which: str, theta: float) -> np.ndarray:
 
 
 # ==================================================================================== model
-class TimeFeatures(nn.Module):
-    def __init__(self, n_freq: int = 8):
-        super().__init__()
-        self.register_buffer("freq", 2.0 ** torch.arange(n_freq) * math.pi)
-
-    def forward(self, t):                          # t: (B,) in [0, 1]
-        a = t[:, None] * self.freq[None, :]
-        return torch.cat([t[:, None], torch.sin(a), torch.cos(a)], 1)
-
-
-class MeanFlowMLP(nn.Module):
-    """u_theta(x, t, s): average velocity from t to s, for x at time t."""
-
-    def __init__(self, width: int = 256, depth: int = 4):
-        super().__init__()
-        self.tf = TimeFeatures()
-        d_in = 2 + 3 * (1 + 2 * 8)                 # x, and features of t, s, s - t
-        layers, d = [], d_in
-        for _ in range(depth):
-            layers += [nn.Linear(d, width), nn.SiLU()]
-            d = width
-        layers += [nn.Linear(d, 2)]
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x, t, s):
-        h = torch.cat([x, self.tf(t), self.tf(s), self.tf(s - t)], 1)
-        return self.net(h)
-
-
+# TimeFeatures, MeanFlowMLP, VelocityMLP and the MeanFlow trainer live in toy/common.py (shared
+# with toy/gmm_study.py).  At dim = 2 they are bit-for-bit the classes this file defined.
 def train(model: MeanFlowMLP, steps: int, batch: int, seed: int, long_share: float = 0.5,
           verbose: bool = True):
-    """MeanFlow objective (Geng et al.), in this file's time convention.
-
-    With x_t = (1 - t) x0 + t x1 and v = x1 - x0, the average velocity obeys
-        u(x_t, t, s) = v + (s - t) * du/dt,     du/dt = d/dt u(x_t, t, s) along the path,
-    and the total derivative is one JVP with tangent (v, 1, 0).  With probability 3/4 we set
-    s = t, where the target reduces to plain flow matching v.
-    """
-    rng = np.random.default_rng(seed)
-    torch.manual_seed(seed)
-    data = torch.from_numpy(two_moons(200_000, DATA_NOISE, rng))
-    opt = torch.optim.Adam(model.parameters(), lr=3e-4)
-    warm = 500
-    sched = torch.optim.lr_scheduler.LambdaLR(
-        opt, lambda k: min(1.0, (k + 1) / warm) * 0.5 * (1 + math.cos(math.pi * min(1.0, k / steps))))
-    ema = MeanFlowMLP().to(DEVICE)
-    ema.load_state_dict(model.state_dict())
-    started = time.perf_counter()
-    for step in range(1, steps + 1):
-        idx = torch.randint(0, len(data), (batch,))
-        x1 = data[idx]
-        x0 = torch.randn_like(x1)
-        t = torch.rand(batch)
-        # Curriculum on the interval: the JVP target is only as good as u already is, so the
-        # early model must not be asked about long jumps.  The share of s != t pairs and the
-        # longest allowed interval both grow linearly over the first third of training.
-        ramp = min(1.0, step / (steps / 3))
-        long = torch.rand(batch) < long_share * ramp
-        s = torch.where(long, t + (1 - t) * torch.rand(batch) * ramp, t)
-        z = (1 - t)[:, None] * x0 + t[:, None] * x1
-        v = x1 - x0
-        u, dudt = torch.func.jvp(lambda z_, t_, s_: model(z_, t_, s_), (z, t, s),
-                                 (v, torch.ones_like(t), torch.zeros_like(s)))
-        target = (v + (s - t)[:, None] * dudt).detach()
-        err = ((u - target) ** 2).sum(1)
-        # adaptive weighting from the MeanFlow paper (p = 0.5): tames the large-|s - t| terms
-        w = 1.0 / (err.detach() + 1e-3) ** 0.5
-        loss = (w * err).mean()
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
-        sched.step()
-        with torch.no_grad():
-            for pe, pm in zip(ema.parameters(), model.parameters()):
-                pe.mul_(0.999).add_(pm, alpha=0.001)
-        if verbose and (step % 1000 == 0 or step == 1):
-            print("  step %5d  loss %.4f  raw mse %.4f  (%.0fs)"
-                  % (step, loss.item(), err.mean().item(), time.perf_counter() - started))
-    return ema
-
-
-class VelocityMLP(nn.Module):
-    """v_theta(x, t): the instantaneous velocity field, trained by plain flow matching."""
-
-    def __init__(self, width: int = 256, depth: int = 4):
-        super().__init__()
-        self.tf = TimeFeatures()
-        layers, d = [], 2 + (1 + 2 * 8)
-        for _ in range(depth):
-            layers += [nn.Linear(d, width), nn.SiLU()]
-            d = width
-        layers += [nn.Linear(d, 2)]
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x, t):
-        return self.net(torch.cat([x, self.tf(t)], 1))
+    """MeanFlow objective (Geng et al.) on two moons; see common.train_meanflow."""
+    return train_meanflow(model, lambda rng: two_moons(200_000, DATA_NOISE, rng), steps, batch,
+                          seed, long_share=long_share, verbose=verbose)
 
 
 def integrate(v, x, t0: torch.Tensor, t1: torch.Tensor, steps: int = 16):

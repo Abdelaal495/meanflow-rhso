@@ -17,6 +17,7 @@ python tests/test_hpo_lock.py               # needs pyyaml + git
 python tests/test_paired_stats.py           # needs numpy
 python tests/test_flower.py                 # needs jax + pyyaml (+ torch for the JiT path)
 python tests/test_fingerprints.py           # needs jax + pyyaml (imports run.py)
+python tests/test_gmm_study.py             # needs torch + git (no trained model)
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -224,6 +225,20 @@ sizes line up with the benchmark's), that the first-batch z_t0 depends on the ba
 not the method, and that a changed measurement, guide or initial state, a batch size or image
 count without a benchmark counterpart, an inconsistent benchmark, a missing fingerprint and an
 unaggregated run all fail and name the job.
+
+`test_gmm_study.py` covers the exact quantities of the Gaussian-mixture study (rebuttal
+Task 4), with no trained model: the mixture's structure and sample moments; the closed-form
+posterior against importance sampling (log evidence, mean, covariance and component
+probabilities within Monte Carlo error for denoising, masking and the random projection,
+with an equal-weight proposal so the closed-form weights are tested, and a sigma-doubled
+posterior shown to fail); the exact velocity against the posterior of x_t = t x1 + (1 - t) x0
+and its values at t = 0 and 1; the exact flow carrying N(0, I) to the mixture at the sliced-W2
+floor; that `toy/common.py` reproduces the pre-refactor two-moons trainers bit for bit
+(against `toy/rhso_two_moons.py` at commit 0d1eaed); and the raw-error floor of the MeanFlow
+target: the per-row exact velocity equals the scalar one, the batch replay reproduces
+`train_meanflow`'s own batches (at learning rate 0 the logged raw error is recomputed
+exactly), and the closed form |dPhi/dz (v - v*)|^2 matches the exact average velocity's
+error against a finite-difference target built the way the trainer builds it.
 
 ## What these tests do NOT cover
 
