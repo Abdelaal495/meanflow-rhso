@@ -107,6 +107,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                    help="disable GPU peak-memory instrumentation (it is cheap and "
                         "non-invasive, but this is the escape hatch)")
     p.add_argument("--run-id", default=None, help="reuse an existing run directory name")
+    p.add_argument("--memory-baseline-only", action="store_true",
+                   help="load each planned model, record what it alone costs in GPU memory "
+                        "(memory_baseline_<model>.json in the run directory) and exit "
+                        "without running a job; used by scripts/run_timing.py")
 
     cluster = p.add_argument_group(
         "cluster / offline execution",
@@ -406,7 +410,7 @@ def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
 # =====================================================================================
 # One atomic job
 # =====================================================================================
-def run_job(adapter, spec, problem, manager, profiler=None) -> Dict[str, Any]:
+def run_job(adapter, spec, problem, manager, profiler=None, timing=None) -> Dict[str, Any]:
     """Execute one atomic job: one model, one problem, one method, one hyperparameter set.
 
     Batching is the only decision made here; every scientific setting arrived in the spec.
@@ -421,6 +425,10 @@ def run_job(adapter, spec, problem, manager, profiler=None) -> Dict[str, Any]:
     baseline is taken immediately before the first chunk's reconstruction, so building the
     initial state and loading the model are outside the incremental figure.  It is None
     during warm-up, which must never contribute to a reported number.
+
+    `timing` (a src.timing.TimingDetail, OPT-IN via runtime.timing_detail) adds an outer,
+    device-synchronised wall clock around each chunk's reconstruction and memory snapshots
+    just before the first chunk and after the last.  With timing=None nothing changes.
     """
     reconstruct = select_reconstructor(spec.dynamics_family, spec.method)
     bs = max(1, int(spec.batch_size))
@@ -452,9 +460,18 @@ def run_job(adapter, spec, problem, manager, profiler=None) -> Dict[str, Any]:
 
         if profiler is not None and profiler.baseline_gib is None:
             profiler.establish_baseline()
+        if timing is not None and timing.snapshots.get("before_timed_region") is None:
+            timing.snapshot("before_timed_region")
         region = profiler.measure() if profiler is not None else contextlib.nullcontext()
         with region:
-            x_final, stats = reconstruct(adapter, cond, x0, sub_problem, spec)
+            if timing is None:
+                x_final, stats = reconstruct(adapter, cond, x0, sub_problem, spec)
+            else:
+                timing.timer.start()
+                x_final, stats = reconstruct(adapter, cond, x0, sub_problem, spec)
+                timing.timer.stop(x_final, stats.seconds, size)
+        if timing is not None:
+            timing.snapshot("after_timed_region")
         total.merge(stats)
         pixels = adapter.to_pixels(x_final)
         outputs.append(pixels[:size] if pad else pixels)
@@ -1519,6 +1536,27 @@ def aggregate_only(plan, config: Dict[str, Any], run_dir: Path, args) -> int:
     return 0
 
 
+def memory_baseline_only(plan, manager, run_dir: Path) -> int:
+    """`--memory-baseline-only`: what each resident model alone costs, then exit.
+
+    Run in its own process by scripts/run_timing.py, through the same steps as a timing
+    process up to the model load (data, problems, frameworks), so the difference between
+    a configuration's peak and this baseline is that configuration's own memory.
+    """
+    from src.timing import model_only_baseline
+    for model in plan.scheduled_models():
+        adapter = manager.acquire(model)
+        payload = model_only_baseline(adapter, model)
+        payload["model_load_seconds"] = round(float(manager.load_seconds.get(model, 0.0)), 2)
+        path = run_dir / ("memory_baseline_%s.json" % model)
+        save_json(path, payload)
+        print("Model-only baseline %s: allocator %s GiB in use, NVML reserved %s GiB -> %s"
+              % (model.upper(), payload.get("allocator_in_use_gib"),
+                 payload.get("nvml_process_reserved_gib"), path))
+        manager.release(model)
+    return 0
+
+
 # =====================================================================================
 # Main
 # =====================================================================================
@@ -1684,6 +1722,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             or len(plan.resources.frameworks) > 1))
     manager = ModelManager(config, plan, bool(release), context)
 
+    if args.memory_baseline_only:
+        return memory_baseline_only(plan, manager, run_dir)
+
     writer = ResultWriter(run_dir, shard=shard)
     reconstructions: Dict[str, np.ndarray] = {}
     resume = bool(rt.get("resume", True))
@@ -1692,6 +1733,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     do_warmup = not args.no_warmup
     profile_memory = bool(rt.get("gpu_memory_profiling", True))
     nvml_interval = float(rt.get("nvml_sample_interval", 0.02))
+    # OPT-IN (rebuttal Task 1, src/timing.py); off unless the config sets it.
+    timing_detail = bool(rt.get("timing_detail", False))
 
     # ---------------------------------------------------------------- model-major execution
     started = time.perf_counter()
@@ -1729,6 +1772,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
 
         load_seconds = manager.load_seconds.get(model, 0.0)
+        after_load = None
+        if timing_detail:
+            from src.timing import memory_snapshot
+            after_load = memory_snapshot(adapter.spec.framework)
 
         if args.check:
             probe = specs[0]
@@ -1783,13 +1830,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # first-call allocations are part of the baseline, not of the measurement.
                 profiler = GpuMemoryProfiler(adapter, enabled=profile_memory,
                                              nvml_interval=nvml_interval)
-                run = run_job(adapter, spec, problem, manager, profiler=profiler)
+                timing = None
+                if timing_detail:
+                    from src.timing import TimingDetail
+                    timing = TimingDetail(adapter.spec.framework, after_load=after_load)
+                run = run_job(adapter, spec, problem, manager, profiler=profiler,
+                              timing=timing)
                 memory = profiler.report()
                 metrics = evaluate_reconstruction(run["pixels"], problem, spec)
                 record = build_record(spec, plan, problem, run, metrics,
                                       degraded_metrics[spec.problem_key], run["status"],
                                       None if run["status"] == "ok" else run["status"],
                                       warm_seconds, load_seconds, memory=memory)
+                if timing is not None:
+                    # metadata.json and results.jsonl only; results.csv keeps its columns.
+                    record["timing_detail"] = timing.report(memory)
                 out = persist_job(run_dir, spec, run, record, metrics, problem, save_images)
                 record["output_dir"] = str(out)
                 reconstructions[spec.job_id] = run["pixels"]

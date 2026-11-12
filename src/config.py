@@ -612,7 +612,10 @@ TOP_LEVEL_KEYS = ("runtime", "data", "models", "defaults", "experiments", "metri
 RUNTIME_KEYS = ("seed", "accelerator", "output_root", "cache_root",
                 "release_model_after_use", "continue_on_experiment_error", "progress_bars",
                 "save_individual_images", "verbose", "max_atomic_jobs", "resume",
-                "warmup", "replicate", "gpu_memory_profiling", "nvml_sample_interval")
+                "warmup", "replicate", "gpu_memory_profiling", "nvml_sample_interval",
+                # OPT-IN (rebuttal Task 1): per-image device-synchronised timing and
+                # allocator snapshots, see src/timing.py. Absent = off = unchanged runs.
+                "timing_detail")
 DATA_KEYS = ("source", "local_folder", "image_size")
 DEFAULTS_KEYS = SWEEPABLE_FIELDS + ("record_loss_history",)
 EXPERIMENT_KEYS = ("enabled", "problem", "num_images", "degradation", "defaults",
@@ -903,6 +906,8 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
         raise ConfigError("runtime.release_model_after_use must be 'auto', true or false.")
     if not isinstance(rt.get("gpu_memory_profiling", True), bool):
         raise ConfigError("runtime.gpu_memory_profiling must be a boolean.")
+    if not isinstance(rt.get("timing_detail", False), bool):
+        raise ConfigError("runtime.timing_detail must be a boolean.")
     interval = rt.get("nvml_sample_interval", 0.02)
     if not _finite(interval) or not 0.001 <= float(interval) <= 1.0:
         raise ConfigError("runtime.nvml_sample_interval must lie in [0.001, 1.0] seconds "

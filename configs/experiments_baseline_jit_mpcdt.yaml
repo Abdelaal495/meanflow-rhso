@@ -1,0 +1,68 @@
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: true
+  continue_on_experiment_error: true
+  progress_bars: false
+  save_individual_images: true
+  verbose: true
+  max_atomic_jobs: 200
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+data:
+  source: local_folder
+  local_folder: cache/data/imagenet100_c42_i43_mirror
+  image_size: 256
+models:
+  jit:
+    variant: JiT-B/16
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+metrics:
+  lpips: true
+  lpips_net: alex
+experiments:
+  deblurring__core:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation:
+      sigma: 0.05
+      blur_sigma: 1.0
+      kernel_size: 7
+      padding: reflect
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lam: 1000
+            lr: 0.1
+  box_inpainting__core:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation:
+      sigma: 0.05
+      box: 40
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 20
+            lam: 180
+            lr: 0.1

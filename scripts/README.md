@@ -7,6 +7,7 @@
 | `make_matched_configs.py` | matched-budget RHSO vs MPC-Δt: `screen` writes the screening grid (one block per budget-defining pair), `freeze` writes the 100-image evaluation from the tuning runs; each with a 2-image smoke variant |
 | `paired_stats.py` | paired RHSO − MPC-Δt differences per prior and task, with bootstrap 95% intervals, as CSV and LaTeX rows |
 | `make_flower_configs.py` | Flower on pMF / JiT: `screen` writes the screen (`num_flower_steps` 50/100/200/500, plus `flower_cg_max_iters` 50/100 on deblurring; 4 images), `freeze` writes the 100-image evaluation from the tuning runs; each with a 2-image smoke variant |
+| `make_timing_config.py`, `run_timing.py`, `summarize_timing.py` | rebuttal Task 1: one timing configuration per prior (every task and method of the three frozen configs, 3 images, batch size 1, plus a 2-image smoke variant); a driver that runs each configuration in a fresh process with one shared run id after a model-only memory baseline; and the per-prior summary (seconds per image, allocator peak memory, seconds per forward-equivalent) with LaTeX tables |
 | `check_fingerprints.py` | fails loudly unless every job of a Flower or matched-budget run has the benchmark run's measurement and initial-state fingerprints |
 | `extract_imagenet100_from_tar.py` | the same pool from a local ImageNet tar instead of the mirror |
 | `export_recon_bundle_only.py`, `add_corrupted_images_to_bundle.py` | package a run's reconstructions for sharing |
@@ -119,3 +120,23 @@ batch size and image count. The frozen configs use the benchmark's batch sizes, 
 has a counterpart. It exits non-zero, naming each job, on any mismatch, on a job with no
 benchmark counterpart (a 2-image smoke run, say), on a job that recorded no fingerprint, and
 on an internally inconsistent benchmark. Aggregate sharded runs (`run.py --aggregate`) first.
+
+## Timing and peak memory (rebuttal Task 1)
+
+```bash
+python scripts/make_timing_config.py            # writes configs/experiments_rebuttal_timing_<prior>[_smoke].yaml
+python scripts/run_timing.py --config configs/experiments_rebuttal_timing_pmf_smoke.yaml     --run-id timing_pmf_smoke --with-checks      # smoke, same GPU type
+python scripts/run_timing.py --config configs/experiments_rebuttal_timing_pmf.yaml --run-id timing_pmf
+python scripts/summarize_timing.py outputs/timing_pmf outputs/timing_jit outputs/timing_imf outputs/timing_sit
+```
+
+On the cluster, `sbatch --export=ALL,PRIOR=pmf slurm/run_timing.sh` runs one prior on one
+GPU. Each configuration gets its own process, because a framework never returns reserved GPU
+memory while its process lives: in a long multi-job process the NVML number of a job is the
+pool left by every job before it. The driver sets `XLA_PYTHON_CLIENT_ALLOCATOR=bfc` and
+`XLA_PYTHON_CLIENT_PREALLOCATE=false` for its child processes only. The primary memory
+figure is the allocator peak (PyTorch `max_memory_allocated` over the timed region; JAX
+`peak_bytes_in_use` of a process that ran one configuration, with the scope it is valid for);
+the NVML figure is the process's reserved pool plus CUDA context. `runtime.timing_detail: true`
+(src/timing.py) adds a device-synchronised per-image timer and allocator, pool, hardware and
+version records to each job's `metadata.json`; results.csv is unchanged.

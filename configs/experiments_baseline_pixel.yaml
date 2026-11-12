@@ -1,0 +1,335 @@
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: true
+  continue_on_experiment_error: true
+  progress_bars: false
+  save_individual_images: true
+  verbose: true
+  max_atomic_jobs: 200
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+data:
+  source: local_folder
+  local_folder: cache/data/imagenet100_c42_i43_mirror
+  image_size: 256
+models:
+  jit:
+    variant: JiT-B/16
+  pmf: {}
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+metrics:
+  lpips: true
+  lpips_net: alex
+experiments:
+  denoising__core:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation:
+      sigma: 0.2
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:
+            t0: 1.0
+            solver: heun
+            steps: 25
+          pnp:
+            t0: 1.0
+            num_pnp_steps: 50
+            gamma0: 200000.0
+            alpha: 0.5
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 20
+            lam: 30
+            lr: 0.3
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:
+            t0: 1.0
+            steps: 2
+          pnp:
+            t0: 1.0
+            num_pnp_steps: 10
+            gamma0: 200000.0
+            alpha: 0.1
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 20
+            lam: 30
+            lr: 0.15
+  denoising__rhso:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation:
+      sigma: 0.2
+    models:
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:
+            t0: 1.0
+            num_rhso_steps: 4
+            num_opt_steps: 40
+            lr: 0.03
+            mu: 1
+  deblurring__core:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation:
+      sigma: 0.05
+      blur_sigma: 1.0
+      kernel_size: 7
+      padding: reflect
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:
+            t0: 1.0
+            solver: heun
+            steps: 25
+          pnp:
+            t0: 1.0
+            num_pnp_steps: 200
+            gamma0: 1200000.0
+            alpha: 0.5
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lam: 1000
+            lr: 0.1
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:
+            t0: 1.0
+            steps: 2
+          pnp:
+            t0: 1.0
+            num_pnp_steps: 200
+            gamma0: 5000000.0
+            alpha: 1
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lam: 1000
+            lr: 0.1
+  deblurring__rhso:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation:
+      sigma: 0.05
+      blur_sigma: 1.0
+      kernel_size: 7
+      padding: reflect
+    models:
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:
+            t0: 1.0
+            num_rhso_steps: 8
+            num_opt_steps: 20
+            lr: 0.01
+            mu: 0
+  super_resolution__core:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation:
+      sigma: 0.05
+      factor: 2
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:
+            t0: 1.0
+            solver: heun
+            steps: 25
+          pnp:
+            t0: 1.0
+            num_pnp_steps: 20
+            gamma0: 200000.0
+            alpha: 0.25
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lam: 540
+            lr: 0.05
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:
+            t0: 1.0
+            steps: 2
+          pnp:
+            t0: 1.0
+            num_pnp_steps: 20
+            gamma0: 100000.0
+            alpha: 0.1
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lam: 360
+            lr: 0.15
+  super_resolution__rhso:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation:
+      sigma: 0.05
+      factor: 2
+    models:
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:
+            t0: 1.0
+            num_rhso_steps: 4
+            num_opt_steps: 40
+            lr: 0.01
+            mu: 0.2
+  random_inpainting__core:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation:
+      sigma: 0.01
+      missing_fraction: 0.7
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:
+            t0: 1.0
+            solver: heun
+            steps: 25
+          pnp:
+            t0: 1.0
+            num_pnp_steps: 50
+            gamma0: 100000.0
+            alpha: 0.1
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 20
+            lam: 1000
+            lr: 0.05
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:
+            t0: 1.0
+            steps: 2
+          pnp:
+            t0: 1.0
+            num_pnp_steps: 20
+            gamma0: 100000.0
+            alpha: 0.1
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lam: 360
+            lr: 0.15
+  random_inpainting__rhso:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation:
+      sigma: 0.01
+      missing_fraction: 0.7
+    models:
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:
+            t0: 1.0
+            num_rhso_steps: 4
+            num_opt_steps: 40
+            lr: 0.01
+            mu: 0
+  box_inpainting__core:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation:
+      sigma: 0.05
+      box: 40
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:
+            t0: 1.0
+            solver: heun
+            steps: 25
+          pnp:
+            t0: 1.0
+            num_pnp_steps: 50
+            gamma0: 200000.0
+            alpha: 0.1
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 20
+            lam: 180
+            lr: 0.1
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:
+            t0: 1.0
+            steps: 2
+          pnp:
+            t0: 1.0
+            num_pnp_steps: 50
+            gamma0: 200000.0
+            alpha: 0.1
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lam: 180
+            lr: 0.3
+  box_inpainting__rhso:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation:
+      sigma: 0.05
+      box: 40
+    models:
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:
+            t0: 1.0
+            num_rhso_steps: 8
+            num_opt_steps: 20
+            lr: 0.01
+            mu: 0

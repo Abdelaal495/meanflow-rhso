@@ -20,6 +20,7 @@ python tests/test_fingerprints.py           # needs jax + pyyaml (imports run.py
 python tests/test_gmm_study.py             # needs torch + git (no trained model)
 python tests/test_gmm_solvers.py           # needs torch (no trained model)
 python tests/test_hexagon_study.py         # needs torch (no trained model)
+python tests/test_timing_configs.py         # needs jax + pyyaml (imports run.py)
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -176,6 +177,15 @@ in the documented direction (`s₁ = 0.5000` at `β=0.5`, `0.2500` uniform, `0.0
 and that `delta` is null off the uniform grid; and that Experiment 6 enables both
 diagnostics on exactly the jacobian config's settings, images and probe seed while keeping
 the old jobs' identities disjoint.
+
+`test_timing_configs.py` covers the timing and peak-memory run (rebuttal Task 1): the
+generated per-prior timing configurations regenerate byte for byte, every block resolves to
+one job at batch size 1 that equals its frozen source entry in every non-identity field, and
+every source entry is covered exactly once; `runtime.timing_detail` is opt-in; the
+synchronised per-image timer, the JAX allocator-peak scope rule and the hardware records work;
+`run_job` returns bit-identical pixels with and without the timing detail; the driver runs a
+model-only baseline, one process per block and an aggregate; and `summarize_timing.py` builds
+the three Table 29-style tables from synthetic runs.
 
 `test_matched_configs.py`, `test_hpo_lock.py` and `test_paired_stats.py` cover the
 matched-budget comparison of RHSO and MPC-Δt (rebuttal Task 2). The first resolves the
