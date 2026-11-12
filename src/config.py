@@ -29,7 +29,7 @@ import datetime
 import itertools
 import math
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .rhso_diagnostics import (DEFAULT_JACOBIAN_POWER_ITERATIONS, DEFAULT_JACOBIAN_PROBES,
@@ -226,6 +226,13 @@ MODEL_CAPABILITIES: Dict[str, ModelCapabilities] = {
                              ("gpu", "cpu"), False, FLOW_ASCENDING,
                              ("euler", "heun", "rk4")),
 }
+# Flower's refinement is a proximal step on the IMAGE, so only the pixel-space priors offer
+# it; SiT and iMF (latent) keep their entries exactly as they were.
+for _pixel_model in ("pmf", "jit"):
+    MODEL_CAPABILITIES[_pixel_model] = replace(
+        MODEL_CAPABILITIES[_pixel_model],
+        supported_methods=MODEL_CAPABILITIES[_pixel_model].supported_methods + ("flower",))
+del _pixel_model
 
 
 # =====================================================================================
@@ -331,6 +338,13 @@ RHSO_FIELDS: Tuple[str, ...] = (
     # from the random-direction Jacobian probes above.  Off by default.
     "rhso_gradient_authority_diagnostics")
 
+# Flower (src/flower.py).  num_flower_steps is the iteration count N (one network
+# evaluation each); flower_gamma is 0 (the paper's reported setting) or 1 (adds a posterior
+# sample kappa_t); the CG settings only matter for deblurring.  No phi_normalization: the
+# refinement weighs the data term by the true noise level 1/sigma^2 and nothing else.
+FLOWER_FIELDS: Tuple[str, ...] = (
+    "num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol")
+
 METHOD_DECLARATIONS: Dict[str, MethodDeclaration] = {
     "sdedit": MethodDeclaration(
         "sdedit", "SDEdit", False, False, SHARED_FIELDS + SDEDIT_FIELDS,
@@ -369,13 +383,20 @@ METHOD_DECLARATIONS: Dict[str, MethodDeclaration] = {
         "measurement loss through the generative map.  q is initialised to the shared "
         "z_t0, so t0 < 1 optimises an INTERMEDIATE state rather than the source "
         "distribution -- an intentional extension of the published method."),
+    "flower": MethodDeclaration(
+        "flower", "Flower", False, False, SHARED_FIELDS + FLOWER_FIELDS,
+        "Flower: num_flower_steps iterations of (destination x_hat = x + (1-t) v, or "
+        "T(x; t -> 1) for a MeanFlow -> Gaussian proximal refinement with the true noise "
+        "level, closed form or conjugate gradient -> re-noising to the next time).  Pixel "
+        "priors and linear operators only; never backpropagates through the model."),
 }
 
 METHOD_NAMES: Tuple[str, ...] = tuple(METHOD_DECLARATIONS)
 
 # Strategies that are compared AGAINST SDEdit; each wants a paired SDEdit job at the same t0.
 BASELINE_METHOD: str = "sdedit"
-COMPARED_METHODS: Tuple[str, ...] = ("mpc_rhc", "mpc_delta_t", "pnp", "dflow", "rhso")
+COMPARED_METHODS: Tuple[str, ...] = ("mpc_rhc", "mpc_delta_t", "pnp", "dflow", "rhso",
+                                     "flower")
 
 # The closed set of sweepable fields.  A list in ANY OTHER field is a literal value
 # (e.g. guidance.interval, which is one interval and never a sweep).
@@ -393,6 +414,8 @@ SWEEPABLE_FIELDS: Tuple[str, ...] = (
     "rhso_terminal_mode", "rhso_stage_diagnostics", "rhso_consistency_diagnostics",
     "rhso_jacobian_diagnostics", "rhso_jacobian_probes", "rhso_jacobian_power_iters",
     "rhso_jacobian_seed", "rhso_gradient_authority_diagnostics",
+    # Flower
+    "num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol",
 )
 MODEL_LEVEL_FIELDS: Tuple[str, ...] = ("guidance", "batch_size", "record_loss_history")
 
@@ -489,6 +512,24 @@ RHSO_DEFAULTS: Dict[str, Any] = {
     "mu": 0.0,
 }
 UNTUNED = "repository_default_untuned"
+
+# Flower: N is a starting point to be tuned (the paper uses 100 to 500) and is recorded as
+# UNTUNED.  gamma = 0 is the setting of all of the paper's reported results, and the CG
+# limits are the paper's own (50 iterations, relative residual 1e-5).
+FLOWER_DEFAULTS: Dict[str, Any] = {
+    "num_flower_steps": 100,
+    "flower_gamma": 0,
+    "flower_cg_max_iters": 50,
+    "flower_cg_tol": 1e-5,
+}
+# The operators Flower's refinement is defined for (mirrors src/flower.SUPPORTED_PROBLEMS).
+FLOWER_PROBLEMS: Tuple[str, ...] = ("denoising", "random_inpaint", "box_inpaint",
+                                    "super_resolution", "deblur")
+
+
+def _flower_seed_recipe() -> str:
+    from .flower import FLOWER_SEED_RECIPE        # local: keeps config free of model imports
+    return FLOWER_SEED_RECIPE
 
 
 def _legacy_terminal_mode(dynamics_family: str) -> str:
@@ -816,6 +857,24 @@ def _validate_sweep_values(field_name: str, values: Sequence[Any], where: str, m
         elif field_name == "rhso_jacobian_seed":
             if isinstance(v, bool) or not isinstance(v, int):
                 raise ConfigError("%s: rhso_jacobian_seed must be an integer, got %r."
+                                  % (tag, v))
+        elif field_name == "num_flower_steps":
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ConfigError("%s: num_flower_steps must be an integer >= 1, got %r."
+                                  % (tag, v))
+        elif field_name == "flower_gamma":
+            if isinstance(v, bool) or v not in (0, 1) or not isinstance(v, int):
+                raise ConfigError(
+                    "%s: flower_gamma must be 0 (the paper's reported setting: the "
+                    "refinement returns the posterior mean) or 1 (adds a sample with the "
+                    "posterior covariance), got %r." % (tag, v))
+        elif field_name == "flower_cg_max_iters":
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ConfigError("%s: flower_cg_max_iters must be an integer >= 1, got %r."
+                                  % (tag, v))
+        elif field_name == "flower_cg_tol":
+            if not _finite(v) or not 0.0 < float(v) < 1.0:
+                raise ConfigError("%s: flower_cg_tol must be a number in (0, 1), got %r."
                                   % (tag, v))
         else:                                                       # pragma: no cover
             raise ConfigError("Sweepable field %r has no validation rule." % field_name)
@@ -1166,6 +1225,19 @@ def _validate_method_entry(config, problem, decl, problem_params, model_name, ca
             _validate_sweep_values(key, _check_sweep(entry, key, where), where, method_name,
                                    model_name, warnings_)
 
+    if method_name == "flower":
+        if problem not in FLOWER_PROBLEMS:
+            raise ConfigError(
+                "%s: Flower is defined here for the linear operators %s only, not %r. Its "
+                "refinement is a Gaussian proximal step that needs a linear H and a noisy "
+                "measurement (stroke_painting is excluded)."
+                % (where, list(FLOWER_PROBLEMS), problem))
+        if not float(problem_params.get("sigma", 0.0) or 0.0) > 0.0:
+            raise ConfigError(
+                "%s: Flower weighs the data term by 1/sigma^2 with the TRUE noise level, so "
+                "it needs sigma > 0; %s has sigma=%g."
+                % (where, problem, float(problem_params.get("sigma", 0.0) or 0.0)))
+
     # `gaussian_likelihood` divides by sigma^2; a noiseless measurement makes it undefined.
     # Substituting a tiny epsilon would silently inflate the objective by ~1e16, so it is
     # rejected instead.
@@ -1210,7 +1282,7 @@ def _validate_method_entry(config, problem, decl, problem_params, model_name, ca
     if any(b != DEFAULT_BETA for b in beta_values):
         interval_field = {"sdedit": "steps", "dflow": "steps", "rhso": "num_rhso_steps",
                           "mpc_rhc": "num_mpc_steps", "mpc_delta_t": "num_mpc_steps",
-                          "pnp": "num_pnp_steps"}[method_name]
+                          "pnp": "num_pnp_steps", "flower": "num_flower_steps"}[method_name]
         intervals = as_sweep_list(entry.get(
             interval_field, inherited_model_entry.get(interval_field, None)))
         if method_name != "pnp" and intervals and all(
@@ -1354,6 +1426,13 @@ class JobSpec:
     # repository has always used.  Recorded on every row so a paired sweep is auditable.
     measurement_noise_group: Optional[str] = None
 
+    # -- Flower -------------------------------------------------------------------------
+    # None for every other method, so no existing job's resolved spec changes meaning.
+    num_flower_steps: Optional[int] = None
+    flower_gamma: Optional[int] = None
+    flower_cg_max_iters: Optional[int] = None
+    flower_cg_tol: Optional[float] = None
+
     @property
     def is_mpc(self) -> bool:
         return METHOD_DECLARATIONS[self.method].is_mpc
@@ -1375,6 +1454,8 @@ class JobSpec:
             return "D-Flow"
         if self.method == "rhso":
             return "RHSO"
+        if self.method == "flower":
+            return "Flower"
         return "SDEdit"
 
     @property
@@ -1393,6 +1474,8 @@ class JobSpec:
             return int(self.num_pnp_steps)
         if self.method == "rhso":
             return int(self.num_rhso_steps)
+        if self.method == "flower":
+            return int(self.num_flower_steps)
         return int(self.num_mpc_steps)
 
     @property
@@ -1441,6 +1524,11 @@ class JobSpec:
                 parts.append("diag=%s" % flags)
             if self.phi_normalization != PER_MEASUREMENT_NORMALIZATION:
                 parts.append("phi=%s" % self.phi_normalization)
+        elif self.method == "flower":
+            parts += ["N=%d" % self.num_flower_steps, "gamma=%d" % self.flower_gamma]
+            if (self.flower_cg_max_iters != FLOWER_DEFAULTS["flower_cg_max_iters"]
+                    or self.flower_cg_tol != FLOWER_DEFAULTS["flower_cg_tol"]):
+                parts.append("cg=%d_%g" % (self.flower_cg_max_iters, self.flower_cg_tol))
         else:
             parts += ["N=%d" % self.num_mpc_steps]
             if self.K is not None:
@@ -1488,6 +1576,10 @@ class JobSpec:
                        self.num_opt_steps, self.lr,
                        (" mu=%g" % self.mu) if self.mu else "", self._beta_suffix,
                        self._diagnostic_suffix))
+        if self.method == "flower":
+            return ("%s | %s/%s | Flower | t0=%.2f N=%d gamma=%d%s"
+                    % (self.experiment, self.model, self.problem, self.t0,
+                       self.num_flower_steps, self.flower_gamma, self._beta_suffix))
         return ("%s | %s/%s | %s | t0=%.2f N=%d %s=%.4g lam=%g nctrl=%d lr=%g%s"
                 % (self.experiment, self.model, self.problem, self.method_title, self.t0,
                    self.num_mpc_steps,
@@ -1541,6 +1633,10 @@ class JobSpec:
             # A mu sweep is the point of this field, so panels must never merge over it.
             if self.mu:
                 lines.append("mu=%g" % self.mu)
+        elif self.method == "flower":
+            lines.append("Flower")
+            lines.append("t0=%.2g N=%d" % (self.t0, self.num_flower_steps))
+            lines.append("gamma=%d" % self.flower_gamma)
         else:
             lines.append("MPC-dt")
             lines.append("t0=%.2g N=%d" % (self.t0, self.num_mpc_steps))
@@ -1665,6 +1761,11 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
     "rhso_jacobian_probes": DEFAULT_JACOBIAN_PROBES,
     "rhso_jacobian_power_iters": DEFAULT_JACOBIAN_POWER_ITERATIONS,
     "rhso_jacobian_seed": DEFAULT_JACOBIAN_SEED,
+    # Flower
+    "num_flower_steps": FLOWER_DEFAULTS["num_flower_steps"],
+    "flower_gamma": FLOWER_DEFAULTS["flower_gamma"],
+    "flower_cg_max_iters": FLOWER_DEFAULTS["flower_cg_max_iters"],
+    "flower_cg_tol": FLOWER_DEFAULTS["flower_cg_tol"],
 }
 
 # Every field a JobSpec can carry from the sweep grid.  Fields a method does not use are
@@ -1682,6 +1783,8 @@ SWEEP_ORDER: Tuple[str, ...] = (
     # Appended, never inserted: a new axis with a single value leaves the Cartesian
     # product's ORDER -- and therefore the resolved job list -- exactly as it was.
     "rhso_gradient_authority_diagnostics",
+    # Flower: appended for the same reason.
+    "num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol",
 )
 
 
@@ -1712,6 +1815,10 @@ def _estimate_cost(method: str, values: Dict[str, Any], dynamics_family: str,
     D-Flow:   num_opt_steps objective evaluations plus ONE final terminal evaluation with
               the optimised q, each costing a whole trajectory; the backward pass traverses
               the same model calls again, which is what `backprops` counts.
+    Flower:   N destinations, one network call each, and ZERO backprops.  Its H / H^T
+              applications depend on the operator and on how many CG iterations a
+              deblurring solve takes, so no data-gradient estimate is made: the measured
+              `data_gradient_evaluations` and `linear_solve_iterations` are the record.
     RHSO:     delegated to `rhso.rhso_cost_estimate`, which lives next to the loop it
               describes so the two cannot drift apart.  MeanFlow: N*M planning evaluations
               and N*(M+1) in total.  Standard flow: the solver's stage counts over each
@@ -1737,6 +1844,10 @@ def _estimate_cost(method: str, values: Dict[str, Any], dynamics_family: str,
         m = int(values["noise_samples"])
         return dict(empty, model_evals=1 + n * m, objective_evals=n, data_gradients=n,
                     denoiser_samples=1 + n * m)
+
+    if method == "flower":
+        n = int(values["num_flower_steps"])
+        return dict(empty, model_evals=n, denoiser_samples=n)
 
     if method == "rhso":
         from .rhso import rhso_cost_estimate       # local: rhso imports config at module scope
@@ -1891,6 +2002,11 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                     axis("lr", BUILTIN_DEFAULTS["dflow_lr"], UNTUNED)
                     axis("optimizer", BUILTIN_DEFAULTS["dflow_optimizer"])
                     axis("phi_normalization", BUILTIN_DEFAULTS["pnp_phi_normalization"])
+                elif method_name == "flower":
+                    axis("num_flower_steps", BUILTIN_DEFAULTS["num_flower_steps"], UNTUNED)
+                    # `builtin`: gamma = 0 and the CG limits are the paper's settings
+                    for name in ("flower_gamma", "flower_cg_max_iters", "flower_cg_tol"):
+                        axis(name, BUILTIN_DEFAULTS[name])
                 else:
                     axis("num_mpc_steps", BUILTIN_DEFAULTS["num_mpc_steps"])
                     for name in ("optimizer", "warm_start", "grad_clip", "phi_normalization",
@@ -1966,6 +2082,7 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                         "rhso": values["num_rhso_steps"],
                         "pnp": (int(values["num_pnp_steps"]) + 1)
                         if values["num_pnp_steps"] is not None else None,
+                        "flower": values["num_flower_steps"],
                     }[method_name]
                     if trajectory_intervals:
                         dts = grid_intervals(canonical_time_grid(
@@ -2047,6 +2164,13 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                                 ("jacobian", values["rhso_jacobian_probes"],
                                  values["rhso_jacobian_power_iters"],
                                  values["rhso_jacobian_seed"]))
+                    # Flower's own fields, appended only for Flower jobs: every other job
+                    # keeps the id it had before the method existed.
+                    if method_name == "flower":
+                        identity_extras.append(("flower", int(values["num_flower_steps"]),
+                                                int(values["flower_gamma"]),
+                                                int(values["flower_cg_max_iters"]),
+                                                float(values["flower_cg_tol"])))
                     if identity_extras:
                         hash_parts.append(tuple(identity_extras))
                     # Appended ONLY when the experiment opts in, so an unpaired
@@ -2089,7 +2213,11 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                         grad_clip=(None if values["grad_clip"] is None
                                    else float(values["grad_clip"])),
                         record_loss_history=bool(record_loss),
-                        seed=seed, replicate=replicate, seed_recipes=dict(SEED_RECIPES),
+                        seed=seed, replicate=replicate,
+                        # Flower's noise recipe is recorded on Flower jobs only, so every
+                        # other job's resolved spec (and its resume match) is unchanged.
+                        seed_recipes=(dict(SEED_RECIPES, flower=_flower_seed_recipe())
+                                      if method_name == "flower" else dict(SEED_RECIPES)),
                         hyperparameter_sources=sources,
                         expected_control_iterations=cost["control_iterations"],
                         expected_model_evals=cost["model_evals"],
@@ -2131,6 +2259,15 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                             None if values["rhso_gradient_authority_diagnostics"] is None
                             else bool(values["rhso_gradient_authority_diagnostics"])),
                         measurement_noise_group=noise_group,
+                        num_flower_steps=(int(values["num_flower_steps"])
+                                          if values["num_flower_steps"] is not None else None),
+                        flower_gamma=(int(values["flower_gamma"])
+                                      if values["flower_gamma"] is not None else None),
+                        flower_cg_max_iters=(int(values["flower_cg_max_iters"])
+                                             if values["flower_cg_max_iters"] is not None
+                                             else None),
+                        flower_cg_tol=(float(values["flower_cg_tol"])
+                                       if values["flower_cg_tol"] is not None else None),
                         delta_nominal_uniform=delta_nominal,
                         delta_min=delta_min, delta_max=delta_max,
                         expected_objective_evals=cost["objective_evals"],
@@ -2446,6 +2583,16 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
                               % (_dt_axis(sel), _axis(sel, "phi_normalization"),
                                  ", ".join(sorted({s.hyperparameter_sources.get("lr", "?")
                                                    for s in sel}))))
+                    elif method == "flower":
+                        print("      N %s | gamma %s | CG max iters %s | CG tol %s"
+                              % (_axis(sel, "num_flower_steps", "%s"),
+                                 _axis(sel, "flower_gamma", "%s"),
+                                 _axis(sel, "flower_cg_max_iters", "%s"),
+                                 _axis(sel, "flower_cg_tol", "%g")))
+                        print("      executed dt %s | source %s"
+                              % (_dt_axis(sel), ", ".join(sorted(
+                                  {s.hyperparameter_sources.get("num_flower_steps", "?")
+                                   for s in sel}))))
                     else:
                         if method == "mpc_rhc":
                             print("      K %s" % _axis(sel, "K", "%s"))

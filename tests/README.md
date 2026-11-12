@@ -15,6 +15,7 @@ python tests/test_theory_extensions.py      # needs jax + pyyaml
 python tests/test_matched_configs.py        # needs pyyaml (imports run.py)
 python tests/test_hpo_lock.py               # needs pyyaml + git
 python tests/test_paired_stats.py           # needs numpy
+python tests/test_flower.py                 # needs jax + pyyaml (+ torch for the JiT path)
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -187,6 +188,25 @@ output is byte-identical to `hpo.py` at commit `4d63970`. The third checks the p
 bootstrap against an independent transcription of the protocol (10,000 resamples, seed
 20260903), that pairing is by `image_id`, and that measurement RMSE is a job-level
 difference with no interval.
+
+`test_flower.py` covers Flower (rebuttal Task 3) against two synthetic pixel priors that share
+one destination map: a JAX MeanFlow (BHWC) and a **torch** standard flow with JiT's BCHW layout,
+so `flow_flower` is executed here too and must agree with `meanflow_flower` (1.6e-5). It checks
+`nu_t` at 0, 0.5 and near 1 and the time grid; that the closed-form refinement equals
+conjugate gradient on denoising, both inpaintings and strided SR, and equals the plan's
+unscaled textbook formula; that the VJP adjoint is exact on the reflect-padded blur (whose H
+is not symmetric) and CG matches a dense float64 solve; that at the paper's cap of 50
+iterations the early, ill-conditioned blur solves stop at the cap while late ones converge;
+that the `gamma = 1` sample has covariance `Sigma_t`; that Eval./BP are N and 0 with the H/H^T
+and CG counters as documented and equal to the planner's estimate; determinism, noise that
+follows (image, iteration) and not `num_flower_steps`, and batch independence; that the last
+iteration returns `x_tilde`; the rejections (latent adapter, `stroke_painting`, `sigma = 0`, SiT
+and iMF, bad `flower_gamma`); that the job ids, directories and costs of all 14,967 jobs in the
+24 configurations committed before Flower are unchanged and pre-Flower artefacts still
+resume; that the committed screen/smoke configs are the generator's output and that
+`shared_initial_state` passes for Flower next to SDEdit; and `hpo.py propose --lock
+flower=num_flower_steps`, `make_flower_configs.py freeze` on a planted screen, and that
+`finalize` still demands the six benchmark methods.
 
 ## What these tests do NOT cover
 

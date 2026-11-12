@@ -37,6 +37,12 @@ scripts/make_matched_configs.py):
 
 An RHSO cell run with a non-default `rhso_terminal_mode` (JiT/SiT `direct`) carries that mode
 into every candidate it produces, so a round never swaps the planner, and with it the cost.
+
+Flower (rebuttal Task 3) is ranked and proposed like any other method, but it is not one of
+the six benchmark methods `finalize` requires in every cell; its winners are frozen by
+scripts/make_flower_configs.py freeze instead:
+
+    python scripts/hpo.py propose --from outputs/flower_pmf --models pmf --images 8         --no-paper --lock flower=num_flower_steps --out configs/flower_round2_pmf.yaml
 """
 import argparse
 import collections
@@ -54,6 +60,9 @@ DEGRADATION = {"denoising": "{sigma: 0.20}",
                "random_inpaint": "{sigma: 0.01, missing_fraction: 0.70}",
                "box_inpaint": "{sigma: 0.05, box: 40}"}
 METHODS = ["sdedit", "pnp", "dflow", "mpc_rhc", "mpc_delta_t", "rhso"]
+# Ranked and proposed like METHODS, but never required by `finalize` (see the docstring).
+EXTRA_METHODS = ["flower"]
+SEARCHED = METHODS + EXTRA_METHODS
 
 # The knobs each method sweeps (CSV column names), and which are log-like (extend by the
 # grid ratio) versus linear (extend by the grid step) when a winner sits on an edge.
@@ -64,16 +73,18 @@ KNOBS = {
     "mpc_rhc":     ["K", "lam", "lr"],
     "mpc_delta_t": ["num_mpc_steps", "n_ctrl", "lam", "lr"],
     "rhso":        ["num_rhso_steps", "num_opt_steps", "lr", "mu"],
+    "flower":      ["num_flower_steps"],
 }
 # counts and dimensions double rather than step: an extension of n_ctrl = 20 by the grid's
 # linear step would propose 0, which is not a control dimension
 LOG_KNOBS = {"gamma0", "lam", "lr", "num_pnp_steps", "num_opt_steps", "steps",
-             "n_ctrl", "num_mpc_steps", "num_rhso_steps"}
-INTEGER = {"steps", "num_pnp_steps", "num_opt_steps", "K", "num_mpc_steps", "n_ctrl", "num_rhso_steps"}
+             "n_ctrl", "num_mpc_steps", "num_rhso_steps", "num_flower_steps"}
+INTEGER = {"steps", "num_pnp_steps", "num_opt_steps", "K", "num_mpc_steps", "n_ctrl", "num_rhso_steps",
+           "num_flower_steps"}
 # hard limits a knob cannot be pushed past
 BOUNDS = {"alpha": (0.0, 1.0), "K": (1, 4), "mu": (0.0, None), "steps": (1, None),
           "n_ctrl": (10, None), "num_mpc_steps": (2, None), "num_rhso_steps": (1, None),
-          "num_pnp_steps": (5, None)}
+          "num_pnp_steps": (5, None), "num_flower_steps": (1, None)}
 # what `rhso_terminal_mode: auto` resolves to per model (src/rhso.py legacy_terminal_mode);
 # only a mode that differs from this is written into a generated configuration
 LEGACY_TERMINAL_MODE = {"jit": "suffix", "sit": "suffix", "pmf": "direct", "imf": "direct"}
@@ -87,6 +98,7 @@ FIXED = {
     "mpc_rhc":     {m: "num_mpc_steps: 4, n_ctrl: 40" for m in ("jit", "sit", "pmf", "imf")},
     "mpc_delta_t": {m: "" for m in ("jit", "sit", "pmf", "imf")},
     "rhso":        {"jit": "solver: heun", "sit": "solver: heun", "pmf": "", "imf": ""},
+    "flower":      {m: "" for m in ("jit", "sit", "pmf", "imf")},
 }
 # batch_size per (model, method) for a screening round
 BATCH = {("jit", "sdedit"): 4, ("jit", "pnp"): 4, ("jit", "dflow"): 4, ("jit", "mpc_rhc"): 4,
@@ -96,7 +108,9 @@ BATCH = {("jit", "sdedit"): 4, ("jit", "pnp"): 4, ("jit", "dflow"): 4, ("jit", "
          ("pmf", "sdedit"): 4, ("pmf", "pnp"): 4, ("pmf", "dflow"): 4, ("pmf", "mpc_rhc"): 2,
          ("pmf", "mpc_delta_t"): 4, ("pmf", "rhso"): 4,
          ("imf", "sdedit"): 2, ("imf", "pnp"): 2, ("imf", "dflow"): 2, ("imf", "mpc_rhc"): 2,
-         ("imf", "mpc_delta_t"): 2, ("imf", "rhso"): 2}
+         ("imf", "mpc_delta_t"): 2, ("imf", "rhso"): 2,
+         # Flower: pixel priors only, no backprop through the model
+         ("jit", "flower"): 4, ("pmf", "flower"): 4}
 # standard-flow RHSO memory grows with N, so long-N candidates use smaller batches
 BATCH_RHSO_LONG = {"jit": 2, "sit": 1, "pmf": 4, "imf": 2}
 
@@ -163,7 +177,7 @@ def load(runs, per_image=False):
     images = collections.defaultdict(list)
     for run in runs:
         for r in csv.DictReader(open(Path(run) / "results.csv")):
-            if r["problem"] not in PROBLEMS or r["method"] not in METHODS:
+            if r["problem"] not in PROBLEMS or r["method"] not in SEARCHED:
                 continue
             if r.get("status", "ok") != "ok":
                 continue
@@ -362,7 +376,7 @@ def propose(a):
           % ("mdl", "problem", "method", "n_cfg", "winner", "LPIPS", "notes"))
     for model in models:
         for problem in PROBLEMS:
-            for method in METHODS:
+            for method in SEARCHED:
                 table = rank.get((model, problem, method))
                 if not table:
                     continue
@@ -409,7 +423,7 @@ def propose(a):
         "propose", ", ".join(getattr(a, "from")), "true", 4000, a.pool, model_block(models))]
     n_jobs = 0
     for problem in PROBLEMS:
-        for method in METHODS:
+        for method in SEARCHED:
             per_model = collections.defaultdict(list)
             for model, key, why in candidates.get((problem, method), []):
                 if not any(same(key, k) for k, _ in per_model[model]):
@@ -457,7 +471,7 @@ def restrict(cells, models, grids=None):
     tables = {}
     for model in models:
         for problem in PROBLEMS:
-            for method in METHODS:
+            for method in SEARCHED:
                 table = cells.get((model, problem, method), {})
                 if grids is not None:
                     axes = grids.get((model, method))

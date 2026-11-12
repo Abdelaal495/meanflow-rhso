@@ -107,7 +107,8 @@ def plot_comparison_grid(experiment: str, model: str, records: Sequence[Dict[str
     plt = _setup()
     if not records:
         return []
-    order = {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4, "rhso": 5}
+    order = {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4, "rhso": 5,
+             "flower": 6}
     records = sorted(records, key=lambda r: (order.get(r.get("method", ""), 9),
                                              r.get("t0", 0.0), r.get("sort_key", "")))
     n_images = min(max_rows, len(problem.ground_truth))
@@ -142,7 +143,8 @@ def plot_comparison_grid(experiment: str, model: str, records: Sequence[Dict[str
 
 
 CONFIG_COLORS = {"sdedit": "#4C72B0", "mpc_rhc": "#DD8452", "mpc_delta_t": "#55A868",
-                 "pnp": "#8172B3", "dflow": "#C44E52", "rhso": "#937860"}
+                 "pnp": "#8172B3", "dflow": "#C44E52", "rhso": "#937860",
+                 "flower": "#DA8BC3"}
 
 
 def _beta_suffix(row: Dict[str, Any]) -> List[str]:
@@ -179,6 +181,10 @@ def config_label(row: Dict[str, Any]) -> str:
     elif method == "rhso":
         parts = ["RHSO", "N=%s" % row.get("num_rhso_steps"),
                  "opt=%s" % row.get("num_opt_steps"), "lr=%g" % (row.get("lr") or 0)]
+    elif method == "flower":
+        parts = ["Flower", "N=%s" % row.get("num_flower_steps")]
+        if str(row.get("flower_gamma") or 0) not in ("0", "0.0"):
+            parts.append("gamma=%s" % row.get("flower_gamma"))
     else:
         parts = ["MPC-dt", "N=%s" % row.get("num_mpc_steps"), "lam=%g" % (row.get("lam") or 0)]
     return " ".join(parts + _beta_suffix(row))
@@ -213,12 +219,17 @@ def group_label(row: Dict[str, Any]) -> str:
         # only reweights an objective.
         return "RHSO N=%s opt=%s%s" % (row.get("num_rhso_steps"),
                                        row.get("num_opt_steps"), suffix)
+    if method == "flower":
+        gamma = str(row.get("flower_gamma") or 0)
+        return "Flower N=%s%s%s" % (row.get("num_flower_steps"),
+                                    "" if gamma in ("0", "0.0") else " gamma=%s" % gamma,
+                                    suffix)
     return "MPC-dt N=%s%s" % (row.get("num_mpc_steps"), suffix)
 
 
 def _method_rank(method: str) -> int:
     return {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4,
-            "rhso": 5}.get(method, 9)
+            "rhso": 5, "flower": 6}.get(method, 9)
 
 
 def _shade(base_hex: str, index: int, total: int):
@@ -461,7 +472,7 @@ def plot_quality_vs_cost(rows: Sequence[Dict[str, Any]], path: Path,
     if not usable:
         return None
     markers = {"sdedit": "o", "mpc_rhc": "s", "mpc_delta_t": "^", "pnp": "D",
-               "dflow": "P", "rhso": "*"}
+               "dflow": "P", "rhso": "*", "flower": "v"}
     colors = {"jit": "tab:blue", "pmf": "tab:orange", "sit": "tab:green", "imf": "tab:red"}
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
@@ -508,7 +519,7 @@ def plot_quality_vs_memory(rows: Sequence[Dict[str, Any]], path: Path,
     if not rows:
         return None
     markers = {"sdedit": "o", "mpc_rhc": "s", "mpc_delta_t": "^", "pnp": "D", "dflow": "P",
-               "rhso": "*"}
+               "rhso": "*", "flower": "v"}
     colors = {"jit": "tab:blue", "pmf": "tab:orange", "sit": "tab:green", "imf": "tab:red"}
     batches = sorted({r.get("batch_size") for r in rows if r.get("batch_size")})
 

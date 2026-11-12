@@ -538,7 +538,11 @@ def warmup_key(spec, problem) -> Tuple:
             # integrated suffix), and the diagnostics add traced computations of their own.
             spec.num_rhso_steps, spec.mu, spec.rhso_terminal_mode,
             spec.rhso_stage_diagnostics, spec.rhso_consistency_diagnostics,
-            spec.rhso_jacobian_diagnostics, spec.rhso_gradient_authority_diagnostics)
+            spec.rhso_jacobian_diagnostics, spec.rhso_gradient_authority_diagnostics,
+            # Flower: N fixes the time grid; gamma adds the posterior-sample computation;
+            # the CG limits bound the traced solve.
+            getattr(spec, "num_flower_steps", None), getattr(spec, "flower_gamma", None),
+            getattr(spec, "flower_cg_max_iters", None), getattr(spec, "flower_cg_tol", None))
 
 
 # =====================================================================================
@@ -556,6 +560,8 @@ RESULT_COLUMNS = [
     # PnP-Flow / D-Flow / RHSO hyperparameters
     "num_pnp_steps", "gamma0", "alpha", "noise_samples", "num_opt_steps", "num_rhso_steps",
     "mu",
+    # Flower hyperparameters
+    "num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol",
     "hyperparameter_source_lam", "hyperparameter_source_n_ctrl", "hyperparameter_source_lr",
     "hyperparameter_source_gamma0", "hyperparameter_source_alpha",
     "hyperparameter_source_mu",
@@ -568,6 +574,8 @@ RESULT_COLUMNS = [
     # compute accounting added with PnP-Flow / D-Flow
     "objective_evaluations", "data_gradient_evaluations", "optimizer_iterations",
     "denoiser_samples", "expected_objective_evaluations", "expected_data_gradients",
+    # inner linear-solver iterations (Flower's CG); 0 for every other method
+    "linear_solve_iterations",
     # RHSO terminal planner and theory diagnostics
     "rhso_terminal_mode", "rhso_terminal_planner", "rhso_consistency_kind",
     "rhso_stage_diagnostics", "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics",
@@ -636,6 +644,8 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "num_pnp_steps": spec.num_pnp_steps, "gamma0": spec.gamma0, "alpha": spec.alpha,
         "noise_samples": spec.noise_samples, "num_opt_steps": spec.num_opt_steps,
         "num_rhso_steps": spec.num_rhso_steps, "mu": spec.mu,
+        "num_flower_steps": spec.num_flower_steps, "flower_gamma": spec.flower_gamma,
+        "flower_cg_max_iters": spec.flower_cg_max_iters, "flower_cg_tol": spec.flower_cg_tol,
         "hyperparameter_source_lam": spec.hyperparameter_sources.get("lam"),
         "hyperparameter_source_n_ctrl": spec.hyperparameter_sources.get("n_ctrl"),
         "hyperparameter_source_lr": spec.hyperparameter_sources.get("lr"),
@@ -666,6 +676,7 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "denoiser_samples": stats.denoiser_samples,
         "expected_objective_evaluations": spec.expected_objective_evals * spec.num_chunks,
         "expected_data_gradients": spec.expected_data_gradients * spec.num_chunks,
+        "linear_solve_iterations": stats.linear_solve_iterations,
         "rhso_terminal_mode": spec.rhso_terminal_mode,
         "rhso_terminal_planner": spec.rhso_terminal_planner,
         # What ||p_k - r_k|| means for this job. A pMF semigroup defect and a JiT endpoint
@@ -888,7 +899,8 @@ NEW_SPEC_FIELDS: Tuple[str, ...] = (
     "rhso_terminal_mode", "rhso_terminal_planner", "rhso_consistency_kind",
     "rhso_stage_diagnostics", "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics",
     "rhso_jacobian_probes", "rhso_jacobian_power_iters", "rhso_jacobian_seed",
-    "rhso_gradient_authority_diagnostics", "measurement_noise_group")
+    "rhso_gradient_authority_diagnostics", "measurement_noise_group",
+    "num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol")
 
 
 def _describes_legacy_behaviour(name: str, current: Dict[str, Any]) -> bool:
@@ -916,6 +928,9 @@ def _describes_legacy_behaviour(name: str, current: Dict[str, Any]) -> bool:
     if name == "measurement_noise_group":
         # A stored artefact was produced with the original, unpaired seeding. A job that
         # now asks for a pairing group wants a DIFFERENT y and must re-run.
+        return value is None
+    if name in ("num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol"):
+        # Only a job of another method can predate Flower; for it these are all None.
         return value is None
     return True
 
@@ -972,7 +987,7 @@ def load_finished_job(run_dir: Path, spec) -> Optional[Dict[str, Any]]:
 # Reporting
 # =====================================================================================
 METHOD_ORDER = {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4,
-                "rhso": 5}
+                "rhso": 5, "flower": 6}
 
 
 def print_summary_tables(records: Sequence[Dict[str, Any]]) -> None:

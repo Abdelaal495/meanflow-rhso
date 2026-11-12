@@ -9,6 +9,8 @@ signature; each strategy lives in its own module:
     pnp.py      PnP-Flow                                 (gradient / reproject / denoise)
     dflow.py    D-Flow                                   (source-state optimisation)
     rhso.py     Receding-Horizon State Optimization      (state optimisation + replanning)
+    flower.py   Flower                                   (destination / proximal refinement /
+                                                          re-noising; pixel priors only)
 
 Every reconstructor has the same signature (see docs/extending.md):
 
@@ -56,6 +58,7 @@ def _build_registry() -> None:
     if RECONSTRUCTORS:
         return
     from .dflow import flow_dflow, meanflow_dflow
+    from .flower import flow_flower, meanflow_flower
     from .mpc import flow_mpc_delta_t, flow_mpc_rhc, meanflow_mpc_delta_t, meanflow_mpc_rhc
     from .pnp import flow_pnp, meanflow_pnp
     from .rhso import flow_rhso, meanflow_rhso
@@ -77,6 +80,11 @@ def _build_registry() -> None:
 
     register_reconstructor(STANDARD_FLOW, "rhso", flow_rhso)
     register_reconstructor(MEANFLOW, "rhso", meanflow_rhso)
+
+    # Both families are registered; the capability table limits Flower to the pixel priors
+    # (pMF, JiT), and flower.py itself refuses a latent adapter.
+    register_reconstructor(STANDARD_FLOW, "flower", flow_flower)
+    register_reconstructor(MEANFLOW, "flower", meanflow_flower)
 
 
 def _drop_problem(fn):

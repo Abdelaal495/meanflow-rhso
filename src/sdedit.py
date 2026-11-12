@@ -109,6 +109,12 @@ class ReconstructionStats:
     terminal_planner_kind: Optional[str] = None
     diagnostic_settings: Optional[Dict[str, Any]] = None
 
+    # -- added with Flower ---------------------------------------------------------------
+    # Inner iterations of a linear solve (Flower's conjugate gradient for deblurring).  Each
+    # one applies H and H^T, which are ALSO counted in `data_gradient_evals`; this field
+    # records the solver's own iteration count.  0 for every other method.
+    linear_solve_iterations: int = 0
+
     def merge(self, other: "ReconstructionStats") -> None:
         self.control_iterations += other.control_iterations
         self.model_evals_planning += other.model_evals_planning
@@ -135,6 +141,7 @@ class ReconstructionStats:
         self.consistency_kind = self.consistency_kind or other.consistency_kind
         self.terminal_planner_kind = self.terminal_planner_kind or other.terminal_planner_kind
         self.diagnostic_settings = self.diagnostic_settings or other.diagnostic_settings
+        self.linear_solve_iterations += other.linear_solve_iterations
 
 
 # `canonical_time_grid` used to be defined HERE, which made an algorithm module the owner
