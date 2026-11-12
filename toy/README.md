@@ -29,6 +29,11 @@ iMF's logit-normal(-0.4, 1) with the time direction reversed, and s != t on half
 There is no curriculum and no adaptive weight. The sign is checked against the exact flow of
 the Gaussian mixture by `tests/test_gmm_study.py`.
 
+`MeanFlowMLPLowFreq` and `VelocityMLPLowFreq` are the same MLPs with low-frequency time
+features (`LowTimeFeatures`: raw t plus sin/cos at pi, 2 pi and 4 pi rad per unit time,
+against up to 2^7 pi for `TimeFeatures`). The MeanFlow one is conditioned on (t, s - t)
+rather than (t, s, s - t). They are a separate option; the original classes are unchanged.
+
 ## Gaussian-mixture study: `toy/gmm_study.py` (rebuttal Task 4)
 
 A 16-D mixture of 8 anisotropic Gaussians (scales 0.5 down to 0.02, so some directions carry
@@ -113,4 +118,10 @@ with 1, 2 and 8 steps. It also covers the jumps T(x_t; t -> 1) from the true mar
 t = 0.25, 0.5, 0.75, next to flow-matching Heun from the same x_t. Pass criteria for each
 one-jump prior (the Gaussian-mixture study's, minus its low-signal variance ratio, which has
 no 2-D counterpart): one-step sliced W2 at most 0.05, and 8-step sliced W2 within 1.5x of
-flow-matching Heun-100.
+flow-matching Heun-100. The criteria table also gives the share of one-step samples within
+0.05 of the hexagon, and the median |(s - t) du/dt| against the median |u| at random t < s
+(du/dt along the model's own velocity).
+
+`--features low` (on `train` and `stage1`) trains and evaluates flow matching, MeanFlow
+p = 0.5 and iMF with the low-frequency MLPs, under the same recipe. They get their own cache
+files, logs (`train_<model>_tflow.log`) and table (`outputs/hexagon_study/stage1_low/`).

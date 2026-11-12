@@ -78,6 +78,46 @@ class VelocityMLP(nn.Module):
         return self.net(torch.cat([x, self.tf(t)], 1))
 
 
+# ---- low-frequency time features (added for the hexagon study; the classes above are
+# unchanged).  TimeFeatures reaches 2^7 pi rad per unit time, which makes d/dt of the output
+# large by construction, and only the MeanFlow objectives differentiate in time.
+LOW_N_FREQ = 3                                     # pi, 2 pi, 4 pi = 2 pi * 2 rad per unit time
+
+
+class LowTimeFeatures(TimeFeatures):
+    """[t, sin(2^k pi t), cos(2^k pi t)] for k < 3: at most 2 pi * 2 rad per unit time."""
+
+    def __init__(self):
+        super().__init__(n_freq=LOW_N_FREQ)
+
+
+class MeanFlowMLPLowFreq(nn.Module):
+    """u_theta(x, t, s) with low-frequency features of t and of the interval s - t
+    (conditioned on (t, s - t) instead of (t, s, s - t))."""
+
+    def __init__(self, dim: int = 2, width: int = 256, depth: int = 4):
+        super().__init__()
+        self.dim, self.width, self.depth = dim, width, depth
+        self.tf = LowTimeFeatures()
+        self.net = _mlp(dim + 2 * (1 + 2 * LOW_N_FREQ), dim, width, depth)
+
+    def forward(self, x, t, s):
+        return self.net(torch.cat([x, self.tf(t), self.tf(s - t)], 1))
+
+
+class VelocityMLPLowFreq(nn.Module):
+    """v_theta(x, t) with the low-frequency features of t."""
+
+    def __init__(self, dim: int = 2, width: int = 256, depth: int = 4):
+        super().__init__()
+        self.dim, self.width, self.depth = dim, width, depth
+        self.tf = LowTimeFeatures()
+        self.net = _mlp(dim + (1 + 2 * LOW_N_FREQ), dim, width, depth)
+
+    def forward(self, x, t):
+        return self.net(torch.cat([x, self.tf(t)], 1))
+
+
 def _same_architecture(model: nn.Module) -> nn.Module:
     """A fresh module of the same class and shape (consumes the torch RNG like the original)."""
     return type(model)(dim=model.dim, width=model.width, depth=model.depth).to(

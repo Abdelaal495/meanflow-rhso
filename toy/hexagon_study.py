@@ -6,6 +6,8 @@ Appendix C).
     python -u toy/hexagon_study.py train --model meanflow_p0
     python -u toy/hexagon_study.py train --model meanflow_p0.5
     python -u toy/hexagon_study.py train --model imeanflow         # iMF objective (v-loss)
+    python -u toy/hexagon_study.py train --model flow_matching --features low   # low-frequency
+    python -u toy/hexagon_study.py stage1 --features low           # time features (see below)
     python -u toy/hexagon_study.py stage1                          # sanity table
 
 Training needs CUDA (`--device cuda`, the default) and stops at once when it is missing.  It
@@ -28,6 +30,11 @@ Sanity metrics (stage 1), each on 20,000 samples with the same noise for every s
     true marginal) at t = 0.25, 0.5, 0.75, with flow-matching Heun from the same x_t, and
     the RMS gap between the two endpoints.
 
+Time features (--features): `default` is the MLPs of toy/common.py (features of t, s and
+s - t up to 2^7 pi rad per unit time); `low` is MeanFlowMLPLowFreq / VelocityMLPLowFreq
+(raw t plus sin/cos up to 2 pi * 2 rad per unit time; MeanFlow conditioned on (t, s - t)).
+Each feature set has its own cache files, logs (suffix _tflow) and stage-1 folder.
+
 Time convention (toy/common.py): t = 0 noise, t = 1 data.
 """
 from __future__ import annotations
@@ -47,8 +54,9 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (MeanFlowMLP, VelocityMLP, freeze, train_flow_matching,  # noqa: E402
-                    train_imeanflow, train_meanflow)
+from common import (MeanFlowMLP, MeanFlowMLPLowFreq, VelocityMLP,  # noqa: E402
+                    VelocityMLPLowFreq, freeze, train_flow_matching, train_imeanflow,
+                    train_meanflow)
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / "cache" / "hexagon"
@@ -73,6 +81,11 @@ MEANFLOW_LABELS = {**{"meanflow_p%g" % p: "MeanFlow p=%g" % p for p in SWEEP_P},
 # variance ratio has no counterpart here): one-step sliced W2 at most ONE_STEP_SW2_MAX, and
 # 8-step sliced W2 within EIGHT_STEP_RATIO_MAX of flow-matching Heun-100
 ONE_STEP_SW2_MAX, EIGHT_STEP_RATIO_MAX = 0.05, 1.5
+# time-feature sets: name -> (flow-matching class, MeanFlow class, cache/log suffix,
+#                             the one-jump priors of its stage-1 table)
+FEATURES = {"default": (VelocityMLP, MeanFlowMLP, "", tuple(MEANFLOW_LABELS)),
+            "low": (VelocityMLPLowFreq, MeanFlowMLPLowFreq, "_tflow",
+                    ("meanflow_p0.5", "imeanflow"))}
 PROGRESS_EVERY = 1000
 JUMP_TIMES = (0.25, 0.5, 0.75)
 NEAR = 0.05
@@ -157,19 +170,21 @@ def sliced_w2(a: np.ndarray, b: np.ndarray, n_proj: int = 512, seed: int = 0) ->
 # =====================================================================================
 # The priors
 # =====================================================================================
-def _cache_path(kind: str, steps: int, batch: int, p: float = None) -> Path:
-    tag = "" if p is None else "_p%g" % p
+def _cache_path(kind: str, steps: int, batch: int, p: float = None,
+                features: str = "default") -> Path:
+    tag = ("" if p is None else "_p%g" % p) + FEATURES[features][2]
     return CACHE / ("%s_w%d_d%d_s%d_b%d_seed%d%s.pt" % (kind, WIDTH, DEPTH, steps, batch,
                                                         TRAIN_SEED, tag))
 
 
 def load_or_train(kind: str, steps: int, batch: int, device: str, p: float = None,
-                  retrain: bool = False, verbose: bool = True):
+                  retrain: bool = False, verbose: bool = True, features: str = "default"):
     """kind 'flow_matching', 'meanflow' (adaptive exponent p) or 'imeanflow' (iMF v-loss).
     Returns (model, info).
     Training logs to outputs/hexagon_study/train_<model>.log (see ProgressLog)."""
-    path = _cache_path(kind, steps, batch, p)
-    cls = VelocityMLP if kind == "flow_matching" else MeanFlowMLP
+    path = _cache_path(kind, steps, batch, p, features)
+    fm_cls, mf_cls, suffix, _ = FEATURES[features]
+    cls = fm_cls if kind == "flow_matching" else mf_cls
     if path.exists() and not retrain:
         model = cls(dim=2, width=WIDTH, depth=DEPTH)
         state = torch.load(path, map_location="cpu")
@@ -180,7 +195,7 @@ def load_or_train(kind: str, steps: int, batch: int, device: str, p: float = Non
     torch.manual_seed(TRAIN_SEED)
     model = cls(dim=2, width=WIDTH, depth=DEPTH).to(device)
     data_fn = lambda rng: sample(TRAIN_POOL, rng).astype(np.float32)
-    name = kind if p is None else "%s_p%g" % (kind, p)
+    name = (kind if p is None else "%s_p%g" % (kind, p)) + suffix
     log = ProgressLog(name, steps, OUT / ("train_%s.log" % name))
     log.line("%s  training %s: %d steps, batch %d, width %d, depth %d, %s"
              % (time.strftime("%Y-%m-%d %H:%M:%S"), name, steps, batch, WIDTH, DEPTH, device))
@@ -199,6 +214,7 @@ def load_or_train(kind: str, steps: int, batch: int, device: str, p: float = Non
     seconds = time.perf_counter() - started
     info = dict(kind=kind, steps=steps, batch=batch, width=WIDTH, depth=DEPTH, seed=TRAIN_SEED,
                 adaptive_p=p, seconds=seconds, device=str(device), log=list(log),
+                features=features, architecture=cls.__name__,
                 recipe="Adam 3e-4, 500 warm-up + cosine, grad clip 1, EMA 0.999"
                 + ("; iMF v-loss, logit-normal times, s != t on half the batch"
                    if kind == "imeanflow" else ""))
@@ -249,19 +265,39 @@ def describe(x: np.ndarray, truth: np.ndarray) -> Dict:
 def train(args) -> None:
     require_cuda(args.device)
     kind, p = MODELS[args.model]
-    load_or_train(kind, args.steps, args.batch, args.device, p=p, retrain=args.retrain)
+    load_or_train(kind, args.steps, args.batch, args.device, p=p, retrain=args.retrain,
+                  features=args.features)
+
+
+def jvp_scale(model, device, n: int = 8192, seed: int = 3) -> Dict:
+    """Median |(s - t) du/dt| and median |u| at random t < s on the true marginal, du/dt
+    the JVP along the model's own velocity (u(z, t, t), 1, 0): the term both MeanFlow
+    objectives put into the target (iMF with that tangent, MeanFlow with x1 - x0)."""
+    rng = np.random.default_rng(seed)
+    t = rng.uniform(0, 1, n)
+    s = t + (1 - t) * rng.uniform(0, 1, n)
+    z = (1 - t)[:, None] * rng.standard_normal((n, 2)) + t[:, None] * sample(n, rng)
+    f = lambda a: torch.from_numpy(np.asarray(a, np.float32)).to(device)
+    Z, T, S = f(z), f(t), f(s)
+    with torch.no_grad():
+        v = model(Z, T, T)
+        u, dudt = torch.func.jvp(model, (Z, T, S), (v, torch.ones_like(T), torch.zeros_like(S)))
+    corr = ((S - T)[:, None] * dudt).norm(dim=1)
+    return dict(median_abs_correction=float(corr.median()), median_abs_u=float(u.norm(dim=1).median()))
 
 
 def stage1(args) -> Dict:
     device = args.device
     require_cuda(device)
+    features = args.features
     fm, fm_info = load_or_train("flow_matching", args.steps, args.batch, device,
-                                retrain=args.retrain)
+                                retrain=args.retrain, features=features)
     mfs = {}
-    for name, label in MEANFLOW_LABELS.items():
+    for name in FEATURES[features][3]:
         kind, p = MODELS[name]
-        mfs[label] = load_or_train(kind, args.steps, args.batch, device, p=p,
-                                   retrain=args.retrain) + (name,)
+        mfs[MEANFLOW_LABELS[name]] = load_or_train(kind, args.steps, args.batch, device, p=p,
+                                                   retrain=args.retrain,
+                                                   features=features) + (name,)
 
     n = args.samples
     rng = np.random.default_rng(1)
@@ -292,14 +328,18 @@ def stage1(args) -> Dict:
                              **describe(out, truth)))
     floor = rows[0]["sliced_w2"]
     infos = dict(flow_matching=fm_info, **{name: info for _, info, name in mfs.values()})
+    infos = {k + FEATURES[features][2]: v for k, v in infos.items()}
     fm_heun = rows[1]["sliced_w2"]
     criteria = []
     for label in mfs:
         sw = {r["sampler"]: r["sliced_w2"] for r in rows if r["prior"] == label}
         one, eight = sw["1 step"], sw["8 steps"]
-        criteria.append(dict(prior=label, one_step_sw2=one, one_step_pass=one <= ONE_STEP_SW2_MAX,
+        near1 = [r["near_share"] for r in rows if r["prior"] == label and r["sampler"] == "1 step"][0]
+        criteria.append(dict(prior=label, features=features, one_step_sw2=one,
+                             one_step_pass=one <= ONE_STEP_SW2_MAX,
                              eight_step_sw2=eight, eight_step_over_fm_heun=eight / fm_heun,
-                             eight_step_pass=eight <= EIGHT_STEP_RATIO_MAX * fm_heun))
+                             eight_step_pass=eight <= EIGHT_STEP_RATIO_MAX * fm_heun,
+                             one_step_near_share=near1, **jvp_scale(mfs[label][0], device)))
 
     print("\nsanity checks on %d samples (same noise for every sampler); sliced W2 floor %.4f"
           % (n, floor))
@@ -310,20 +350,22 @@ def stage1(args) -> Dict:
             r["prior"], r["sampler"], r["sliced_w2"], r["dist_mean"], r["dist_median"],
             r["dist_p90"], r["dist_p99"], r["near_share"],
             "%.4f" % r["gap_to_fm"] if "gap_to_fm" in r else ""))
-    print("\npass criteria: one-step SW2 <= %.2f; 8-step SW2 <= %.1fx flow-matching Heun-100 (%.4f)"
-          % (ONE_STEP_SW2_MAX, EIGHT_STEP_RATIO_MAX, fm_heun))
+    print("\npass criteria (%s time features): one-step SW2 <= %.2f; 8-step SW2 <= %.1fx "
+          "flow-matching Heun-100 (%.4f)" % (features, ONE_STEP_SW2_MAX, EIGHT_STEP_RATIO_MAX, fm_heun))
     for c in criteria:
         print("  %-15s one-step SW2 %.4f %s   8-step SW2 %.4f = %.1fx FM %s   overall %s"
+              "   one-step <=0.05 %.3f   median |(s-t) du/dt| %.2f vs |u| %.2f"
               % (c["prior"], c["one_step_sw2"], "PASS" if c["one_step_pass"] else "FAIL",
                  c["eight_step_sw2"], c["eight_step_over_fm_heun"],
                  "PASS" if c["eight_step_pass"] else "FAIL",
-                 "PASS" if c["one_step_pass"] and c["eight_step_pass"] else "FAIL"))
+                 "PASS" if c["one_step_pass"] and c["eight_step_pass"] else "FAIL",
+                 c["one_step_near_share"], c["median_abs_correction"], c["median_abs_u"]))
     for name, info in infos.items():
         print("  training %-16s %5.0f s  (%d steps, batch %d, %.1f ms/step, %s)"
               % (name, info["seconds"], info["steps"], info["batch"],
                  1000 * info["seconds"] / info["steps"], info["device"]))
 
-    out = OUT / "stage1"
+    out = OUT / ("stage1" if features == "default" else "stage1_%s" % features)
     out.mkdir(parents=True, exist_ok=True)
     cols = ["prior", "sampler", "sliced_w2", "dist_mean", "dist_median", "dist_p90", "dist_p99",
             "near_share", "gap_to_fm"]
@@ -388,6 +430,8 @@ def main(argv=None):
         c.add_argument("--steps", type=int, default=TRAIN_STEPS)
         c.add_argument("--batch", type=int, default=TRAIN_BATCH)
         c.add_argument("--retrain", action="store_true")
+        c.add_argument("--features", choices=sorted(FEATURES), default="default",
+                       help="time features of both MLPs (see the module docstring)")
     t.set_defaults(run=train)
     q.set_defaults(run=stage1)
     a = p.parse_args(argv)
