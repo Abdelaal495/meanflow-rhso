@@ -22,6 +22,12 @@ never mix, and the optimiser here is a per-row Adam identical to torch.optim.Ada
 Cost accounting mirrors ReconstructionStats: `evals` = model evaluations (a MeanFlow
 transition is ONE evaluation whatever it costs inside; see gmm_oracle.py), `backprops` =
 evaluations the backward pass traverses, `data_grads` = data-fidelity gradients.
+
+Every solver takes an optional `trace` list (default None: nothing recorded, results
+unchanged).  When given, the solver appends the executed state after every outer step,
+starting with x0, for trajectory figures.  RHSO, MPC-delta_t and MPC-RHC record x_k on their
+outer grids; PnP-Flow and Flower their iterates; D-Flow its optimised initial state q, then
+the output G(q).
 """
 from __future__ import annotations
 
@@ -157,11 +163,16 @@ def _col(v: torch.Tensor) -> torch.Tensor:
     return v[:, None]
 
 
+def _record(trace: Optional[list], x: torch.Tensor) -> None:
+    if trace is not None:
+        trace.append(x.detach().clone())
+
+
 # =====================================================================================
 # RHSO (src/rhso.py)
 # =====================================================================================
 def rhso(prior, rows: Rows, N: int, M: int, lr: torch.Tensor, mu: torch.Tensor,
-         terminal: str = "direct", solver: str = "heun"):
+         terminal: str = "direct", solver: str = "heun", trace: Optional[list] = None):
     """At s_k: M Adam steps on the state q against Phi(planner(q)) + mu R(q, x_k), with a
     fresh anchor and fresh Adam moments, then execute ONE interval from the final q.
 
@@ -172,6 +183,7 @@ def rhso(prior, rows: Rows, N: int, M: int, lr: torch.Tensor, mu: torch.Tensor,
     d = rows.x0.shape[1]
     cost = Cost()
     x = rows.x0.clone()
+    _record(trace, x)
     meanflow = prior.family == "meanflow"
     for k in range(N):
         s, s_next = grid[k], grid[k + 1]
@@ -202,13 +214,15 @@ def rhso(prior, rows: Rows, N: int, M: int, lr: torch.Tensor, mu: torch.Tensor,
             else:
                 x = prior.step(q, s, s_next, solver)
                 cost.evals += prior.step_evals(solver)
+        _record(trace, x)
     return x.detach(), cost
 
 
 # =====================================================================================
 # D-Flow, one step (src/dflow.py)
 # =====================================================================================
-def dflow(prior, rows: Rows, num_opt_steps: int, lr: torch.Tensor, solver: str = "euler"):
+def dflow(prior, rows: Rows, num_opt_steps: int, lr: torch.Tensor, solver: str = "euler",
+          trace: Optional[list] = None):
     """Adam on the initial state q through G(q; 0 -> 1): MeanFlow T(q; 0 -> 1); flow
     matching one Euler step q + v(q, 0) (the image code's steps = 1, solver = euler).  One
     more trajectory after the last update gives the reconstruction."""
@@ -230,13 +244,16 @@ def dflow(prior, rows: Rows, num_opt_steps: int, lr: torch.Tensor, solver: str =
     with torch.no_grad():
         x = G(q)
     cost.evals += per_obj
+    _record(trace, q)
+    _record(trace, x)
     return x.detach(), cost
 
 
 # =====================================================================================
 # PnP-Flow (src/pnp.py), one noise realisation
 # =====================================================================================
-def pnp(prior, rows: Rows, num_pnp_steps: int, gamma0: torch.Tensor, alpha: torch.Tensor):
+def pnp(prior, rows: Rows, num_pnp_steps: int, gamma0: torch.Tensor, alpha: torch.Tensor,
+        trace: Optional[list] = None):
     """Initial projection of x0 at s0 = 0, then for s_k = k / (N + 1), k = 1..N: a gradient
     step of size gamma0 (1 - s_k)^alpha on the fidelity, reprojection s_k z + (1 - s_k) eps,
     and the denoiser (MeanFlow T(q; s_k -> 1); flow matching q + (1 - s_k) v(q, s_k)).
@@ -247,8 +264,10 @@ def pnp(prior, rows: Rows, num_pnp_steps: int, gamma0: torch.Tensor, alpha: torc
                else (lambda q, s: prior.endpoint(q, s)))
     cost = Cost()
     with torch.no_grad():
+        _record(trace, rows.x0)
         x = denoise(rows.x0, 0.0)
         cost.evals += 1
+        _record(trace, x)
         for k in range(1, N + 1):
             s = k / float(N + 1)
             gamma = gamma0 * (1.0 - s) ** alpha
@@ -257,6 +276,7 @@ def pnp(prior, rows: Rows, num_pnp_steps: int, gamma0: torch.Tensor, alpha: torc
             eps = rows.noise.draw(rows, "pnp", k)
             x = denoise(s * z + (1.0 - s) * eps, s)
             cost.evals += 1
+            _record(trace, x)
     return x, cost
 
 
@@ -264,7 +284,7 @@ def pnp(prior, rows: Rows, num_pnp_steps: int, gamma0: torch.Tensor, alpha: torc
 # MPC-delta_t and MPC-RHC (src/mpc.py)
 # =====================================================================================
 def mpc_delta_t(prior, rows: Rows, num_mpc_steps: int, n_ctrl: int, lam: torch.Tensor,
-                lr: torch.Tensor):
+                lr: torch.Tensor, trace: Optional[list] = None):
     """At s: u minimises ||u||^2 + lam Phi(V(x_next(u))), x_next = nominal + dt u (MeanFlow,
     nominal = T(x; s -> s+dt)) or x + dt (v(x, s) + u) (flow matching); the value-to-go is
     Phi(T(x_next; s+dt -> 1)) or Phi(x_next + (1 - s - dt) v(x_next, s + dt)), and simply
@@ -273,6 +293,7 @@ def mpc_delta_t(prior, rows: Rows, num_mpc_steps: int, n_ctrl: int, lam: torch.T
     meanflow = prior.family == "meanflow"
     cost = Cost()
     x = rows.x0.clone()
+    _record(trace, x)
     for k in range(int(num_mpc_steps)):
         s, s_next = grid[k], grid[k + 1]
         dt = s_next - s
@@ -302,11 +323,12 @@ def mpc_delta_t(prior, rows: Rows, num_mpc_steps: int, n_ctrl: int, lam: torch.T
             cost.backprops += used
             cost.data_grads += 1
         x = (base + dt * u).detach()
+        _record(trace, x)
     return x, cost
 
 
 def mpc_rhc(prior, rows: Rows, num_mpc_steps: int, n_ctrl: int, K: int, lam: torch.Tensor,
-            lr: torch.Tensor):
+            lr: torch.Tensor, trace: Optional[list] = None):
     """Receding-horizon control with K planning intervals of h = (1 - s) / K over the
     remaining horizon; cost h sum ||u_k||^2 + lam Phi(x_K); execute the first control over
     the outer interval.  Flow matching: Euler steps x + h (v + u_k) (K = 1 needs no model in
@@ -317,6 +339,7 @@ def mpc_rhc(prior, rows: Rows, num_mpc_steps: int, n_ctrl: int, K: int, lam: tor
     K = int(K)
     cost = Cost()
     x = rows.x0.clone()
+    _record(trace, x)
     for step in range(int(num_mpc_steps)):
         s, s_next = grid[step], grid[step + 1]
         rem = 1.0 - s
@@ -354,6 +377,7 @@ def mpc_rhc(prior, rows: Rows, num_mpc_steps: int, n_ctrl: int, K: int, lam: tor
                 cost.evals += 1
             else:
                 x = x + (s_next - s) * (v0 + U[0])
+        _record(trace, x)
     return x.detach(), cost
 
 
@@ -364,7 +388,7 @@ def flower_nu(t: float) -> float:
     return (1.0 - t) / math.sqrt(t * t + (1.0 - t) * (1.0 - t))
 
 
-def flower(prior, rows: Rows, num_flower_steps: int):
+def flower(prior, rows: Rows, num_flower_steps: int, trace: Optional[list] = None):
     """For t_k = k / N: destination x_hat (MeanFlow T(x; t -> 1); flow matching
     x + (1 - t) v), refinement mu = (nu^-2 I + sigma^-2 H^T H)^-1 (nu^-2 x_hat +
     sigma^-2 H^T y) solved exactly (dense, float64), then x = (1 - t') eps + t' mu with
@@ -379,6 +403,7 @@ def flower(prior, rows: Rows, num_flower_steps: int):
     inv_s2 = (1.0 / rows.sigma.double() ** 2)[:, None]
     eye = torch.eye(rows.x0.shape[1], dtype=torch.float64, device=rows.x0.device)
     x = rows.x0.clone()
+    _record(trace, x)
     with torch.no_grad():
         for k in range(N):
             t, t_next = grid[k], grid[k + 1]
@@ -394,6 +419,7 @@ def flower(prior, rows: Rows, num_flower_steps: int):
                 x = mu
             else:
                 x = (1.0 - t_next) * rows.noise.draw(rows, "flower", k) + t_next * mu
+            _record(trace, x)
     return x, cost
 
 
@@ -445,9 +471,13 @@ def solver_specs() -> List[SolverSpec]:
     ]
 
 
-def call(spec: SolverSpec, prior, rows: Rows, structural: Dict, continuous: Dict[str, torch.Tensor]):
-    """Run one solver with one structural setting; continuous knobs are per-row tensors."""
+def call(spec: SolverSpec, prior, rows: Rows, structural: Dict, continuous: Dict[str, torch.Tensor],
+         trace: Optional[list] = None):
+    """Run one solver with one structural setting; continuous knobs are per-row tensors.
+    `trace`: see the module docstring."""
     kw = dict(spec.fixed)
+    if trace is not None:
+        kw["trace"] = trace
     for key, value in structural.items():
         if key == "NM":
             kw["N"], kw["M"] = value

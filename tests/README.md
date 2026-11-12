@@ -260,7 +260,10 @@ on the exact velocity collapses to E[x1].
 with side 2, centred, with the lower-right corner at (1, -sqrt 3); the distance to the
 hexagon is exact on known points and matches a dense polyline; the data is uniform in arc
 length, and its distance to the hexagon follows the 0.02 jitter; sliced W2 is correct on a
-known Gaussian pair.
+known Gaussian pair. For stage 2, the exact posterior of x given y = x_1 + sigma eps,
+computed by 1-D quadrature along the hexagon, matches importance sampling of the data model
+for sigma 0.1 and 0.3, with both branches present at sigma 0.1. The solvers' optional
+`trace` leaves every output unchanged and records x0 plus one state per outer step.
 
 ## What these tests do NOT cover
 

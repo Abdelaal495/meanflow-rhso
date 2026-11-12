@@ -6,7 +6,12 @@
 3. the data: uniform in arc length (each edge gets 1/6), centred, and its distance to the
    hexagon follows the jitter (|N(0, 0.02^2 I)| projected on the edge normal, away from
    corners: mean 0.02 sqrt(2 / pi));
-4. sliced W2 is right on a known pair of samples.
+4. sliced W2 is right on a known pair of samples;
+5. stage 2: the exact posterior of x given y = x_1 + sigma eps (1-D quadrature along the
+   hexagon) matches importance sampling of the data model (mean within Monte Carlo error,
+   and its samples' mean), for sigma 0.1 and 0.3, with both branches present where the
+   vertical line meets the hexagon twice; and the solvers' optional `trace` changes no
+   output and records x0 plus one state per outer step.
 """
 
 import sys
@@ -30,6 +35,50 @@ RESULTS = []
 def report(name, ok, detail=""):
     print("  [%s] %-50s %s" % ("PASS" if ok else "FAIL", name, detail))
     RESULTS.append(bool(ok))
+
+
+def check_stage2(rng):
+    print("\n5. stage 2: exact posterior and solver traces")
+    import torch
+    import hexagon_stage2 as H2
+    from common import MeanFlowMLPLowFreq, VelocityMLPLowFreq, freeze
+    ok, detail = True, []
+    for sigma, y in ((0.1, 0.4), (0.3, -1.2)):
+        post = H2.Posterior(y, sigma)
+        x = H.sample(2_000_000, rng)
+        w = np.exp(-0.5 * (y - x[:, 0]) ** 2 / sigma ** 2)
+        w /= w.sum()
+        is_mean = w @ x
+        se = np.sqrt((w[:, None] ** 2 * (x - is_mean) ** 2).sum(0))
+        smp = post.sample(200_000, rng)
+        gap = float(np.max(np.abs(post.mean() - is_mean) / se))
+        off = float(np.abs(smp.mean(0) - post.mean()).max())
+        ok &= abs(post.w.sum() - 1) < 1e-12 and gap < 4 and off < 0.01
+        detail.append("sigma %g: |mean - IS| %.1f se, samples' mean off %.4f" % (sigma, gap, off))
+        if sigma == 0.1:                         # two branches: upper and lower edges
+            ok &= (smp[:, 1] > 1).mean() > 0.4 and (smp[:, 1] < -1).mean() > 0.4
+    report("posterior by quadrature = importance sampling", ok, "; ".join(detail))
+
+    torch.manual_seed(0)
+    priors = [H2.FlowPrior(freeze(VelocityMLPLowFreq())), H2.MeanFlowPrior(freeze(MeanFlowMLPLowFreq()))]
+    task = H2.ControlTask("corner", 6, 1, "cpu")
+    small = {"rhso": {"NM": (2, 3)}, "rhso_suffix": {"NM": (2, 3)}, "dflow": {"num_opt_steps": 3},
+             "pnp": {"num_pnp_steps": 3}, "flower": {"num_flower_steps": 3},
+             "mpc_delta_t": {"num_mpc_steps": 2, "n_ctrl": 2}, "mpc_rhc": {"K": 2}}
+    same, lengths = True, {}
+    for spec in H2.specs_for(task):
+        for prior in priors:
+            if prior.family not in spec.families:
+                continue
+            cont = [{k: v[1] for k, v in spec.continuous.items()}]
+            a, _ = H2.run_point(spec, prior, task.rows, small[spec.name], cont)
+            tr = []
+            b, _ = H2.run_point(spec, prior, task.rows, small[spec.name], cont, trace=tr)
+            same &= bool(np.array_equal(a, b)) and bool(np.allclose(tr[-1].double().cpu().numpy(), b))
+            lengths[spec.name] = len(tr)
+    want = {"rhso": 3, "rhso_suffix": 3, "dflow": 2, "pnp": 5, "flower": 4, "mpc_delta_t": 3, "mpc_rhc": 5}
+    report("trace changes nothing", same and lengths == want,
+           "identical outputs for every solver and prior; states recorded %s" % lengths)
 
 
 def main():
@@ -85,6 +134,7 @@ def main():
     report("N(0, I) vs N(e1, I)", abs(sw - 1 / math.sqrt(2)) < 0.02,
            "%.4f, exact |mu| / sqrt(2) = %.4f" % (sw, 1 / math.sqrt(2)))
 
+    check_stage2(rng)
     print("\n%d/%d checks passed" % (sum(RESULTS), len(RESULTS)))
     return 0 if all(RESULTS) else 1
 

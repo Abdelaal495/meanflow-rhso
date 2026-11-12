@@ -125,3 +125,29 @@ flow-matching Heun-100. The criteria table also gives the share of one-step samp
 `--features low` (on `train` and `stage1`) trains and evaluates flow matching, MeanFlow
 p = 0.5 and iMF with the low-frequency MLPs, under the same recipe. They get their own cache
 files, logs (`train_<model>_tflow.log`) and table (`outputs/hexagon_study/stage1_low/`).
+
+### Stage 2: `toy/hexagon_stage2.py`
+
+```bash
+python -u toy/hexagon_stage2.py            # all priors, solvers and tasks, on the GPU
+python -u toy/hexagon_stage2.py --smoke    # tiny grids and seed counts
+```
+
+The priors are the low-feature flow matching, iMF (the primary MeanFlow prior) and MeanFlow
+p = 0.5 models. The solvers are those of `toy/gmm_solvers.py`: RHSO (N * M = 160, plus the
+integrated-suffix variant for flow matching), one-step D-Flow, MPC-RHC, MPC-Δt, PnP-Flow and
+Flower, on the pre-registered pMF grids, with the image code's cost accounting.
+
+- **Control task.** Phi(x) = 1/2 ||x - c||^2, with H = I and y = c, under the image code's
+  fidelity normalisations. There are two targets: the lower-right corner, and the point 0.5
+  below the midpoint of the lower edge. p* is the hexagon point nearest c. Each setting is
+  tuned on 64 seeds by the mean distance to p*, then tested on 512 fresh seeds. Flower's
+  sigma is tuned on {1, 0.3, 0.1, 0.03, 0.01}, as a weight on Phi like MPC's lambda.
+- **Inverse problem.** y = x_1 + sigma eps with sigma in {0.1, 0.3}. The exact posterior
+  along the hexagon comes from 1-D quadrature. Tuning uses 64 problems x 4 seeds, selecting
+  by MSE to x*; the test uses 512 problems x 16 seeds.
+
+Outputs go to `outputs/hexagon_study/stage2/`: `control.csv`, `inverse.csv`, `tuning.csv`,
+`log.txt` and `trajectories_{corner,off_edge}.png`. The figures show 16 test seeds per
+solver and prior. To support them, every solver in `toy/gmm_solvers.py` takes an optional
+`trace` list that records its outer-step states and leaves the result unchanged.
