@@ -18,6 +18,7 @@ python tests/test_paired_stats.py           # needs numpy
 python tests/test_flower.py                 # needs jax + pyyaml (+ torch for the JiT path)
 python tests/test_fingerprints.py           # needs jax + pyyaml (imports run.py)
 python tests/test_gmm_study.py             # needs torch + git (no trained model)
+python tests/test_gmm_solvers.py           # needs torch (no trained model)
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -239,6 +240,14 @@ target: the per-row exact velocity equals the scalar one, the batch replay repro
 `train_meanflow`'s own batches (at learning rate 0 the logged raw error is recomputed
 exactly), and the closed form |dPhi/dz (v - v*)|^2 matches the exact average velocity's
 error against a finite-difference target built the way the trainer builds it.
+
+`test_gmm_solvers.py` covers the paused oracle stage 2 of the mixture study, on the CPU in
+float64: the torch exact velocity against the numpy one, the direct endpoint against the
+closed-form E[x1 | x_t], the 16-step RK4 map against 1000 steps and the numpy exact flow,
+backprop through the map against finite differences; the per-row Adam against
+torch.optim.Adam; that no solver lets rows interact; the cost counts (RHSO against
+`src.rhso.rhso_cost_estimate`); Flower's exact refinement; and that one-step Euler D-Flow
+on the exact velocity collapses to E[x1].
 
 ## What these tests do NOT cover
 

@@ -56,3 +56,21 @@ adaptive-weight exponent {0.5, 1}, learning rate {3e-4, 1e-4} and thinnest std {
 logs the raw MeanFlow error every 100 steps and writes `outputs/gmm_study/sweep/` (one JSON
 per setting, `table.csv`, `curves.png`). A setting blows up when the running median of the
 raw error rises above 10x the lowest value it reached before.
+
+### Oracle-prior stage 2 (paused)
+
+Work on the Gaussian-mixture study was paused before the full oracle run finished; Task 4 now
+uses the hexagon study below. What exists:
+
+- `toy/gmm_oracle.py`: exact priors with no training. The flow-matching interface is the
+  exact mixture velocity, and its direct endpoint `x + (1 - t) v` is exactly `E[x1 | x_t]`.
+  The MeanFlow interface is the exact map `Psi(x; t -> s)`, a 16-step RK4 solve of that
+  velocity, chosen by `python toy/gmm_oracle.py` as the smallest step count within 1e-3
+  relative RMSE of 1000 steps from t = 0, 0.25, 0.5, 0.75 (`outputs/gmm_study/oracle_rk4_check.csv`).
+  One map evaluation counts as one model evaluation.
+- `toy/gmm_solvers.py`: RHSO (direct, and the flow-matching Heun suffix), one-step D-Flow,
+  PnP-Flow, MPC-Δt, MPC-RHC and Flower ported from `src/` onto the toy interfaces, batched
+  over independent rows with a per-row Adam, with the image code's cost accounting.
+- `toy/gmm_stage2.py`: tuning on 64 problems x 4 seeds over the pMF grids, test on
+  512 x 16, metrics against the exact posterior, CSV / LaTeX / figures
+  (`python toy/gmm_stage2.py --block oracle [--smoke]`).

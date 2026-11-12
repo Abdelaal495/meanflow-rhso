@@ -103,15 +103,15 @@ def train_meanflow(model: MeanFlowMLP, data_fn: DataFn, steps: int, batch: int, 
                    long_share: float = 0.5, lr: float = 3e-4, warmup: int = 500,
                    ema_decay: float = 0.999, clip: float = 1.0, verbose: bool = True,
                    log_every: int = 1000, log: Optional[List[dict]] = None,
-                   adaptive_p: float = 0.5) -> MeanFlowMLP:
+                   adaptive_p: float = 0.5, adaptive_c: float = 1e-3) -> MeanFlowMLP:
     """MeanFlow objective (Geng et al.), in this file's time convention.
 
     With x_t = (1 - t) x0 + t x1 and v = x1 - x0, the average velocity obeys
         u(x_t, t, s) = v + (s - t) * du/dt,     du/dt = d/dt u(x_t, t, s) along the path,
     and the total derivative is one JVP with tangent (v, 1, 0).  A pair with s = t is plain
     flow matching.  `data_fn(rng)` returns the training pool (numpy, float32).  Training runs
-    on the device the model is on.  `adaptive_p` is the exponent of the adaptive weight
-    1 / (err + 1e-3)^p.
+    on the device the model is on.  `adaptive_p` and `adaptive_c` are the exponent and the
+    constant of the adaptive weight 1 / (err + c)^p (p = 0 is plain squared error).
     """
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
@@ -141,7 +141,7 @@ def train_meanflow(model: MeanFlowMLP, data_fn: DataFn, steps: int, batch: int, 
         err = ((u - target) ** 2).sum(1)
         # adaptive weighting from the MeanFlow paper (default p = 0.5): tames the large-|s - t|
         # terms; p = 1 makes every sample's weighted error err / (err + 1e-3) < 1
-        w = 1.0 / (err.detach() + 1e-3) ** adaptive_p
+        w = 1.0 / (err.detach() + adaptive_c) ** adaptive_p
         loss = (w * err).mean()
         opt.zero_grad(set_to_none=True)
         loss.backward()
