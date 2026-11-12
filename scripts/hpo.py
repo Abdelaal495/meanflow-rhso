@@ -26,6 +26,17 @@ until no cell wants to move, then `finalize` the winners into the benchmark conf
 to a `--grid` keeps the winner inside the pre-registered ranges: on several axes (D-Flow and
 PnP step counts, RHSO N and M) LPIPS keeps improving with compute far past the grid, which is
 a compute-budget effect rather than a hyperparameter optimum.
+
+For a matched-budget search, `--lock` keeps the budget-defining knobs where the grid put
+them, so an edge push can never change a candidate's backprop count (see
+scripts/make_matched_configs.py):
+
+    python scripts/hpo.py propose --from outputs/matched_pmf --models pmf --images 8 \
+        --no-paper --lock rhso=num_rhso_steps,num_opt_steps \
+        --lock mpc_delta_t=num_mpc_steps,n_ctrl --out configs/matched_round2.yaml
+
+An RHSO cell run with a non-default `rhso_terminal_mode` (JiT/SiT `direct`) carries that mode
+into every candidate it produces, so a round never swaps the planner, and with it the cost.
 """
 import argparse
 import collections
@@ -63,6 +74,9 @@ INTEGER = {"steps", "num_pnp_steps", "num_opt_steps", "K", "num_mpc_steps", "n_c
 BOUNDS = {"alpha": (0.0, 1.0), "K": (1, 4), "mu": (0.0, None), "steps": (1, None),
           "n_ctrl": (10, None), "num_mpc_steps": (2, None), "num_rhso_steps": (1, None),
           "num_pnp_steps": (5, None)}
+# what `rhso_terminal_mode: auto` resolves to per model (src/rhso.py legacy_terminal_mode);
+# only a mode that differs from this is written into a generated configuration
+LEGACY_TERMINAL_MODE = {"jit": "suffix", "sit": "suffix", "pmf": "direct", "imf": "direct"}
 # the YAML key each CSV column maps to (identical here, listed for clarity)
 YAML_KEY = {k: k for m in KNOBS for k in KNOBS[m]}
 # fixed fields every candidate carries, per method and model family
@@ -199,8 +213,11 @@ def extend(value, knob, grid, direction):
     return float("%.2g" % new)
 
 
-def edge_pushes(win_key, method, grid):
-    """Every (new key, why) that moves the winner one step off an edge of `grid`."""
+def edge_pushes(win_key, method, grid, locked=()):
+    """Every (new key, why) that moves the winner one step off an edge of `grid`.
+
+    A knob in `locked` is never moved: a winner on its edge is reported, not extended.
+    """
     out = []
     for i, knob in enumerate(KNOBS[method]):
         v = win_key[i]
@@ -208,6 +225,10 @@ def edge_pushes(win_key, method, grid):
         if v is None or len(axis) < 2:
             continue
         g = sorted(axis)
+        if knob in locked:
+            if any(abs(v - edge) <= 1e-9 * max(1, abs(edge)) for edge in (g[0], g[-1])):
+                out.append((None, "%s=%s locked" % (knob, fmt(v, knob))))
+            continue
         for direction, edge in ((-1, g[0]), (+1, g[-1])):
             if abs(v - edge) <= 1e-9 * max(1, abs(edge)):
                 new = extend(v, knob, axis, direction)
@@ -235,10 +256,43 @@ def batch_for(model, method, key):
     return BATCH[(model, method)]
 
 
-def method_fields(method, model, key):
+def method_fields(method, model, key, terminal_mode=None):
     fields = ["t0: 1.0"] + ([FIXED[method][model]] if FIXED[method][model] else [])
+    if method == "rhso" and terminal_mode and terminal_mode != LEGACY_TERMINAL_MODE[model]:
+        fields.append("rhso_terminal_mode: %s" % terminal_mode)
     return fields + ["%s: %s" % (YAML_KEY[kn], fmt(v, kn))
                      for kn, v in zip(KNOBS[method], key) if v is not None]
+
+
+def cell_terminal_mode(table, cell):
+    """The one `rhso_terminal_mode` every row of an RHSO cell ran with (None if unrecorded).
+
+    Two planners in one cell are two cost models ranked against each other, so that is
+    refused rather than resolved by picking one.
+    """
+    if cell[2] != "rhso":
+        return None
+    modes = {e["row"].get("rhso_terminal_mode") or None for e in table.values()}
+    if len(modes) > 1:
+        raise SystemExit("cell %s mixes rhso_terminal_mode values %s; rank them separately"
+                         % ("/".join(cell), sorted(m or "unset" for m in modes)))
+    return modes.pop() if modes else None
+
+
+def parse_locks(specs):
+    """['rhso=num_rhso_steps,num_opt_steps', ...] -> {method: {knob, ...}}."""
+    locks = collections.defaultdict(set)
+    for spec in specs or []:
+        method, sep, knobs = spec.partition("=")
+        if not sep or method not in KNOBS:
+            raise SystemExit("--lock %r: expected METHOD=KNOB[,KNOB] with METHOD one of %s"
+                             % (spec, ", ".join(sorted(KNOBS))))
+        for knob in filter(None, knobs.split(",")):
+            if knob not in KNOBS[method]:
+                raise SystemExit("--lock %r: %r is not a searched knob of %s (%s)"
+                                 % (spec, knob, method, ", ".join(KNOBS[method])))
+            locks[method].add(knob)
+    return locks
 
 
 HEADER = """# =====================================================================================
@@ -299,9 +353,11 @@ def model_block(models):
 # =====================================================================================
 def propose(a):
     models = [m for m in a.models.split(",") if m]
+    locks = parse_locks(getattr(a, "lock", None))
     rank, _, _ = load(getattr(a, "from"))
     _, grids, _ = load(a.grid or getattr(a, "from"))
     candidates = collections.defaultdict(list)          # (problem, method) -> [(model, key, why)]
+    modes = {}                                          # (model, problem, method) -> terminal mode
     print("%-4s %-17s %-12s %6s  %-44s %8s %s"
           % ("mdl", "problem", "method", "n_cfg", "winner", "LPIPS", "notes"))
     for model in models:
@@ -310,6 +366,8 @@ def propose(a):
                 table = rank.get((model, problem, method))
                 if not table:
                     continue
+                modes[(model, problem, method)] = cell_terminal_mode(
+                    table, (model, problem, method))
                 ranked = sorted(table.items(), key=lambda kv: kv[1]["lpips"])
                 win_key, win = ranked[0]
                 chosen = [(k, "top%d" % (i + 1)) for i, (k, _) in enumerate(ranked[:a.top])]
@@ -325,7 +383,8 @@ def propose(a):
                                 chosen.append((ranked[hit[0]][0], "paper"))
                         else:
                             notes.append("paper cfg NOT in sweep")
-                for key, why in edge_pushes(win_key, method, grids[(model, method)]):
+                for key, why in edge_pushes(win_key, method, grids[(model, method)],
+                                            locks.get(method, ())):
                     if key is None:
                         notes.append(why)
                     elif not any(same(key, k) for k in table):
@@ -371,8 +430,9 @@ def propose(a):
                     lines.append("      %s:" % model)
                     lines.append("        batch_size: %d" % batch_for(model, method, key))
                     lines.append("        methods:")
+                    fields = method_fields(method, model, key, modes[(model, problem, method)])
                     lines.append("          %-12s {%s}   # %s"
-                                 % (method + ":", ", ".join(method_fields(method, model, key)), why))
+                                 % (method + ":", ", ".join(fields), why))
                     n_jobs += 1
     Path(a.out).write_text("\n".join(lines) + "\n")
     print("\nwrote %s: %d jobs at %d images" % (a.out, n_jobs, a.images))
@@ -456,8 +516,10 @@ def finalize(a):
                 out.append("        methods:")
                 for method in methods:
                     key, cell, _ = best[(model, problem, method)]
+                    fields = method_fields(method, model, key,
+                                           cell["row"].get("rhso_terminal_mode") or None)
                     out.append("          %-12s {%s}   # LPIPS %.4f PSNR %.2f at %d tuning images"
-                               % (method + ":", ", ".join(method_fields(method, model, key)),
+                               % (method + ":", ", ".join(fields),
                                   cell["lpips"], cell["psnr"] or 0.0, cell["n"]))
     Path(a.out).write_text("\n".join(out) + "\n")
     print("wrote %s (%d models x %d cells)" % (a.out, len(models), len(PROBLEMS) * len(METHODS)))
@@ -481,6 +543,10 @@ def main():
     q.add_argument("--paper", action=argparse.BooleanOptionalAction, default=True,
                    help="also re-run the manuscript's configuration where a cell has one")
     q.add_argument("--images", type=int, default=8)
+    q.add_argument("--lock", action="append", default=[], metavar="METHOD=KNOB[,KNOB]",
+                   help="never extend these knobs past a grid edge, e.g. "
+                        "rhso=num_rhso_steps,num_opt_steps for a matched-budget search "
+                        "(repeatable)")
     q.add_argument("--pool", default="cache/data/imagenet_val_100")
     q.set_defaults(run=propose)
 

@@ -12,6 +12,9 @@ python tests/test_rhso.py                   # needs jax + optax
 python tests/test_rhso_theory.py            # needs jax + optax + pyyaml
 python tests/test_cluster_and_aggregation.py  # needs pyyaml + bash (no jax/torch)
 python tests/test_theory_extensions.py      # needs jax + pyyaml
+python tests/test_matched_configs.py        # needs pyyaml (imports run.py)
+python tests/test_hpo_lock.py               # needs pyyaml + git
+python tests/test_paired_stats.py           # needs numpy
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -168,6 +171,22 @@ in the documented direction (`s₁ = 0.5000` at `β=0.5`, `0.2500` uniform, `0.0
 and that `delta` is null off the uniform grid; and that Experiment 6 enables both
 diagnostics on exactly the jacobian config's settings, images and probe seed while keeping
 the old jobs' identities disjoint.
+
+`test_matched_configs.py`, `test_hpo_lock.py` and `test_paired_stats.py` cover the
+matched-budget comparison of RHSO and MPC-Δt (rebuttal Task 2). The first resolves the
+generated screen, smoke and frozen configurations through the real validator and planner and
+checks that every job's backprops per image equal the budget in its block name (`N·M` for
+RHSO, `(N − 1)·C` for MPC-Δt), that the pair set is exactly the plan's with no off-budget
+pair, that the budgets read from the frozen benchmark are the plan's Table 6, that
+`--models <prior>` keeps one prior under the file's own `max_atomic_jobs`, and that `freeze`
+picks the planted winner inside the screened grid and refuses an off-budget one. The second
+runs `hpo.py propose` on a screen whose winners sit on every edge: without `--lock` the budget
+knobs are pushed (so the test has teeth), with it they never are, while lr, mu and lam still
+are; JiT keeps `rhso_terminal_mode: direct`; and on inputs that predate both features the
+output is byte-identical to `hpo.py` at commit `4d63970`. The third checks the paired
+bootstrap against an independent transcription of the protocol (10,000 resamples, seed
+20260903), that pairing is by `image_id`, and that measurement RMSE is a job-level
+difference with no interval.
 
 ## What these tests do NOT cover
 
