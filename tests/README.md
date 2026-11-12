@@ -16,6 +16,7 @@ python tests/test_matched_configs.py        # needs pyyaml (imports run.py)
 python tests/test_hpo_lock.py               # needs pyyaml + git
 python tests/test_paired_stats.py           # needs numpy
 python tests/test_flower.py                 # needs jax + pyyaml (+ torch for the JiT path)
+python tests/test_fingerprints.py           # needs jax + pyyaml (imports run.py)
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -196,17 +197,33 @@ so `flow_flower` is executed here too and must agree with `meanflow_flower` (1.6
 conjugate gradient on denoising, both inpaintings and strided SR, and equals the plan's
 unscaled textbook formula; that the VJP adjoint is exact on the reflect-padded blur (whose H
 is not symmetric) and CG matches a dense float64 solve; that at the paper's cap of 50
-iterations the early, ill-conditioned blur solves stop at the cap while late ones converge;
+iterations the early, ill-conditioned blur solves stop at the cap while late ones converge,
+that CG starts at `x_hat` (zero iterations return it) and that at t = 0 a cap of 50 stops at
+the cap while 100 converges;
 that the `gamma = 1` sample has covariance `Sigma_t`; that Eval./BP are N and 0 with the H/H^T
 and CG counters as documented and equal to the planner's estimate; determinism, noise that
 follows (image, iteration) and not `num_flower_steps`, and batch independence; that the last
 iteration returns `x_tilde`; the rejections (latent adapter, `stroke_painting`, `sigma = 0`, SiT
 and iMF, bad `flower_gamma`); that the job ids, directories and costs of all 14,967 jobs in the
 24 configurations committed before Flower are unchanged and pre-Flower artefacts still
-resume; that the committed screen/smoke configs are the generator's output and that
-`shared_initial_state` passes for Flower next to SDEdit; and `hpo.py propose --lock
-flower=num_flower_steps`, `make_flower_configs.py freeze` on a planted screen, and that
-`finalize` still demands the six benchmark methods.
+resume; that the committed screen/smoke configs are the generator's output (48 screen jobs:
+the CG cap {50, 100} on deblurring only) and that `shared_initial_state` passes for Flower
+next to SDEdit; that `hpo.py` keys the CG cap on deblurring only, that `propose --lock
+flower=num_flower_steps,flower_cg_max_iters` keeps both knobs inside the screened grid
+(locking N alone does not hold the cap), that `make_flower_configs.py freeze` picks the planted
+winner and writes its deblurring cap into the frozen configs, refusing off-protocol winners;
+and that `finalize` still demands the six benchmark methods.
+
+`test_fingerprints.py` covers `scripts/check_fingerprints.py` on realistic job sets: the
+benchmark is `experiments_final_frozen100.yaml` resolved by the planner, and the Flower and
+matched-budget runs are the frozen configs their `freeze` commands write from planted tuning
+results, written with run.py's own CSV writer. Initial-state fingerprints are computed as
+`run.run_job` computes them (first batch of `prior_sample` at t0 = 1, on toy adapters). It
+checks that correct runs pass with every one of their 35 jobs compared (so the frozen batch
+sizes line up with the benchmark's), that the first-batch z_t0 depends on the batch size and
+not the method, and that a changed measurement, guide or initial state, a batch size or image
+count without a benchmark counterpart, an inconsistent benchmark, a missing fingerprint and an
+unaggregated run all fail and name the job.
 
 ## What these tests do NOT cover
 

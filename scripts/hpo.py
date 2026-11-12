@@ -42,7 +42,13 @@ Flower (rebuttal Task 3) is ranked and proposed like any other method, but it is
 the six benchmark methods `finalize` requires in every cell; its winners are frozen by
 scripts/make_flower_configs.py freeze instead:
 
-    python scripts/hpo.py propose --from outputs/flower_pmf --models pmf --images 8         --no-paper --lock flower=num_flower_steps --out configs/flower_round2_pmf.yaml
+    python scripts/hpo.py propose --from outputs/flower_pmf --models pmf --images 8 \
+        --no-paper --lock flower=num_flower_steps,flower_cg_max_iters \
+        --out configs/flower_round2_pmf.yaml
+
+Flower's CG cap is a knob of the deblurring cells only (KNOB_PROBLEMS): on every other task
+the refinement is closed form, so the cap is ignored there and never enters a key, a grid or
+a generated configuration.
 """
 import argparse
 import collections
@@ -73,18 +79,22 @@ KNOBS = {
     "mpc_rhc":     ["K", "lam", "lr"],
     "mpc_delta_t": ["num_mpc_steps", "n_ctrl", "lam", "lr"],
     "rhso":        ["num_rhso_steps", "num_opt_steps", "lr", "mu"],
-    "flower":      ["num_flower_steps"],
+    "flower":      ["num_flower_steps", "flower_cg_max_iters"],
 }
+# knobs that only exist on some problems; elsewhere they are None in every key
+KNOB_PROBLEMS = {("flower", "flower_cg_max_iters"): ("deblur",)}
 # counts and dimensions double rather than step: an extension of n_ctrl = 20 by the grid's
 # linear step would propose 0, which is not a control dimension
 LOG_KNOBS = {"gamma0", "lam", "lr", "num_pnp_steps", "num_opt_steps", "steps",
-             "n_ctrl", "num_mpc_steps", "num_rhso_steps", "num_flower_steps"}
+             "n_ctrl", "num_mpc_steps", "num_rhso_steps", "num_flower_steps",
+             "flower_cg_max_iters"}
 INTEGER = {"steps", "num_pnp_steps", "num_opt_steps", "K", "num_mpc_steps", "n_ctrl", "num_rhso_steps",
-           "num_flower_steps"}
+           "num_flower_steps", "flower_cg_max_iters"}
 # hard limits a knob cannot be pushed past
 BOUNDS = {"alpha": (0.0, 1.0), "K": (1, 4), "mu": (0.0, None), "steps": (1, None),
           "n_ctrl": (10, None), "num_mpc_steps": (2, None), "num_rhso_steps": (1, None),
-          "num_pnp_steps": (5, None), "num_flower_steps": (1, None)}
+          "num_pnp_steps": (5, None), "num_flower_steps": (1, None),
+          "flower_cg_max_iters": (1, None)}
 # what `rhso_terminal_mode: auto` resolves to per model (src/rhso.py legacy_terminal_mode);
 # only a mode that differs from this is written into a generated configuration
 LEGACY_TERMINAL_MODE = {"jit": "suffix", "sit": "suffix", "pmf": "direct", "imf": "direct"}
@@ -148,8 +158,14 @@ def fnum(x):
         return None
 
 
+def knob_applies(method, knob, problem):
+    problems = KNOB_PROBLEMS.get((method, knob))
+    return problems is None or problem in problems
+
+
 def key_of(row, method):
-    return tuple(fnum(row.get(k)) for k in KNOBS[method])
+    return tuple(fnum(row.get(k)) if knob_applies(method, k, row.get("problem")) else None
+                 for k in KNOBS[method])
 
 
 def same(a, b):

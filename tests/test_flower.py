@@ -33,6 +33,7 @@ import hashlib
 import importlib.util
 import io
 import math
+import re
 import tempfile
 
 import numpy as np
@@ -297,6 +298,22 @@ def check_cg(results):
                           "t=0.95: %d iters, residual %.1e"
                           % (capped[0][0], capped[0][1], capped[0][3], capped[0][2],
                              capped[1][0], capped[1][1])))
+
+    # CG is warm-started at x_hat (zero iterations return x_hat itself), and the deblurring
+    # screen's two caps at the worst-conditioned time t = 0: 50 stops at the cap, 100 converges
+    zero = FlowerRefinement(ops, problem, x_hat, cg_max_iters=0)
+    starts_at_x_hat = np.array_equal(np.asarray(zero(x_hat, 0.0)), np.asarray(x_hat))
+    at_t0 = {}
+    for cap in (50, 100):
+        r = FlowerRefinement(ops, problem, x_hat, cg_max_iters=cap)
+        r(x_hat, 0.0)
+        at_t0[cap] = (r.last_iterations, r.last_residual)
+    results.append(report("CG starts at x_hat; t = 0 residual, caps 50/100",
+                          starts_at_x_hat and at_t0[50][0] == 50 and at_t0[50][1] > 1e-5
+                          and at_t0[100][0] < 100 and at_t0[100][1] <= 1e-5,
+                          "0 iterations return x_hat; cap 50: %d iters, residual %.2e; "
+                          "cap 100: %d iters, residual %.2e"
+                          % (at_t0[50][0], at_t0[50][1], at_t0[100][0], at_t0[100][1])))
 
     # per-image CG: an image's solve does not depend on its batch partner
     one = make_problem("deblur").subset([0])
@@ -595,16 +612,20 @@ def check_configs(results):
     specs = plan.specs
     cells = {}
     for s in specs:
-        cells.setdefault((s.model, s.problem), []).append(s.num_flower_steps)
-    results.append(report("screen: 40 Flower jobs, pMF + JiT x 5 tasks x N",
-                          len(specs) == 40 and {s.method for s in specs} == {"flower"}
-                          and {s.model for s in specs} == {"pmf", "jit"}
-                          and all(sorted(v) == [50, 100, 200, 500] for v in cells.values())
+        cells.setdefault((s.model, s.problem), []).append((s.num_flower_steps,
+                                                            s.flower_cg_max_iters))
+    grid_ok = all(sorted(v) == sorted((n, c) for n in (50, 100, 200, 500)
+                                      for c in ((50, 100) if p == "deblur" else (50,)))
+                  for (m, p), v in cells.items())
+    results.append(report("screen: 48 jobs; CG cap {50, 100} on deblurring only",
+                          len(specs) == 48 and {s.method for s in specs} == {"flower"}
+                          and {s.model for s in specs} == {"pmf", "jit"} and grid_ok
                           and len(cells) == 10 and all(s.num_images == 4 and s.t0 == 1.0
                                                        and s.flower_gamma == 0 for s in specs)
-                          and len({s.job_id for s in specs}) == 40
-                          and cfg["runtime"]["max_atomic_jobs"] >= 40,
-                          "%d jobs, %d cells, 4 images, t0 = 1, gamma = 0" % (len(specs), len(cells))))
+                          and len({s.job_id for s in specs}) == 48
+                          and cfg["runtime"]["max_atomic_jobs"] >= 48,
+                          "%d jobs: N x {50, 100} on deblurring (8 per prior), N at cap 50 "
+                          "elsewhere (4 per task and prior)" % len(specs)))
     results.append(report("screen: every job Eval. = N, BP = 0",
                           all(s.expected_model_evals == s.num_flower_steps
                               and s.expected_backprops == 0 for s in specs),
@@ -652,11 +673,15 @@ def check_freeze_and_hpo(results):
     print("\nhpo.py and make_flower_configs.py freeze")
     gen = load_script("make_flower_configs")
     hpo = gen.hpo
-    results.append(report("hpo.py knows the flower knob",
-                          hpo.KNOBS["flower"] == ["num_flower_steps"] and "flower" not in hpo.METHODS
-                          and "flower" in hpo.SEARCHED,
-                          "KNOBS['flower'] = %s; finalize still requires %s"
-                          % (hpo.KNOBS["flower"], hpo.METHODS)))
+    results.append(report("hpo.py knows the flower knobs",
+                          hpo.KNOBS["flower"] == ["num_flower_steps", "flower_cg_max_iters"]
+                          and "flower" not in hpo.METHODS and "flower" in hpo.SEARCHED
+                          and hpo.key_of({"problem": "deblur", "num_flower_steps": "100",
+                                          "flower_cg_max_iters": "100"}, "flower") == (100.0, 100.0)
+                          and hpo.key_of({"problem": "denoising", "num_flower_steps": "100",
+                                          "flower_cg_max_iters": "50"}, "flower") == (100.0, None),
+                          "KNOBS['flower'] = %s (the CG cap only on deblurring); finalize still "
+                          "requires %s" % (hpo.KNOBS["flower"], hpo.METHODS)))
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         screen_rows, r2_rows = [], []
@@ -664,23 +689,32 @@ def check_freeze_and_hpo(results):
         for model in ("pmf", "jit"):
             for problem in hpo.PROBLEMS:
                 for n, v in lp.items():
-                    screen_rows.append(dict(model=model, problem=problem, num_flower_steps=n,
-                                            lpips=v, num_images=4))
-                # round 2 at 8 images: 200 wins for pMF, 500 for JiT; an off-grid 1000 is
-                # better still but must not be chosen
-                for n, v in ((200, 0.21 if model == "pmf" else 0.26),
-                             (500, 0.23 if model == "pmf" else 0.22), (1000, 0.10)):
+                    # deblurring: the cap-100 runs win, so the winner sits on BOTH edges
+                    for cap in ((50, 100) if problem == "deblur" else (50,)):
+                        screen_rows.append(dict(model=model, problem=problem,
+                                                num_flower_steps=n, flower_cg_max_iters=cap,
+                                                lpips=v - (0.01 if cap == 100 else 0.0),
+                                                num_images=4))
+                # round 2 at 8 images: pMF (200, cap 50), JiT (500, cap 100); an off-grid
+                # N = 1000 and, on deblurring, an off-grid cap 200 are better but must lose
+                r2 = [(200, 50, 0.21 if model == "pmf" else 0.26),
+                      (500, 100 if problem == "deblur" else 50, 0.23 if model == "pmf" else 0.22),
+                      (1000, 50, 0.10)]
+                if problem == "deblur":
+                    r2.append((500, 200, 0.05))
+                for n, cap, v in r2:
                     r2_rows.append(dict(model=model, problem=problem, num_flower_steps=n,
-                                        lpips=v, num_images=8))
+                                        flower_cg_max_iters=cap, lpips=v, num_images=8))
         write_results(tmp / "flower_screen", screen_rows)
         write_results(tmp / "flower_r2", r2_rows)
 
         def propose(lock):
-            out = tmp / ("round2_%s.yaml" % bool(lock))
+            # neutral file name: the header comment quotes the output path
+            out = tmp / ("round2_lock%d.yaml" % (len(lock.split(",")) if lock else 0))
             argv = ["propose", "--from", str(tmp / "flower_screen"), "--models", "pmf,jit",
                     "--images", "8", "--no-paper", "--top", "2", "--out", str(out)]
             if lock:
-                argv += ["--lock", "flower=num_flower_steps"]
+                argv += ["--lock", "flower=%s" % lock]
             sys_argv, sys.argv = sys.argv, ["hpo.py"] + argv
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
@@ -689,14 +723,26 @@ def check_freeze_and_hpo(results):
                 sys.argv = sys_argv
             return out.read_text()
 
-        free, locked = propose(False), propose(True)
-        pushed = [l for l in free.split("\n") if "flower:" in l and "edge" in l.lower()]
-        results.append(report("propose: flower edge pushed without --lock, never with it",
-                              "flower:" in free and "num_flower_steps: 1077" in free
+        def caps_in(text):
+            return sorted({int(c) for c in re.findall(r"flower_cg_max_iters: (\d+)", text)})
+
+        def cap_off_deblur(text):
+            blocks = re.split(r"\n  (?=\w+__flower__c\d+:)", text)[1:]     # [0] is the header
+            return any("flower_cg_max_iters" in b for b in blocks if "problem: deblur" not in b)
+
+        free = propose(None)
+        n_only = propose("num_flower_steps")
+        locked = propose("num_flower_steps,flower_cg_max_iters")
+        results.append(report("propose --lock keeps N and the CG cap in the grid",
+                              "num_flower_steps: 1077" in free and 200 in caps_in(free)
+                              and "num_flower_steps: 1077" not in n_only
+                              and 200 in caps_in(n_only)
                               and "num_flower_steps: 1077" not in locked
-                              and locked.count("flower:") == 20,
-                              "unlocked proposes N=1077 past the 500 edge; locked re-runs the "
-                              "top 2 of each of 10 cells only"))
+                              and caps_in(locked) == [50, 100] and locked.count("flower:") == 20
+                              and not any(cap_off_deblur(t) for t in (free, n_only, locked)),
+                              "unlocked: N=1077 and cap 200; locking N alone still moves the "
+                              "cap to 200; locking both keeps every cap in {50, 100} (top-2 "
+                              "re-runs only); no cap is ever written off deblurring"))
 
         out = tmp / "frozen.yaml"
         with contextlib.redirect_stdout(io.StringIO()):
@@ -705,28 +751,45 @@ def check_freeze_and_hpo(results):
         from src.config import load_config, resolve_run_plan, validate_config
         cfg = load_config(str(out))
         plan = resolve_run_plan(cfg, validate_config(cfg), run_id="frozen")
-        chosen = {(s.model, s.problem): s.num_flower_steps for s in plan.specs}
+        chosen = {(s.model, s.problem): (s.num_flower_steps, s.flower_cg_max_iters)
+                  for s in plan.specs}
+        want = {(m, p): ((200, 50) if m == "pmf" else (500, 100 if p == "deblur" else 50))
+                for m in ("pmf", "jit") for p in hpo.PROBLEMS}
+        text = out.read_text()
         smoke_cfg = load_config(gen.matched.smoke_path(out))
         smoke = resolve_run_plan(smoke_cfg, validate_config(smoke_cfg), run_id="fs").specs
-        results.append(report("freeze: lowest LPIPS inside the screened grid",
-                              all(v == (200 if m == "pmf" else 500) for (m, _), v in chosen.items())
-                              and len(chosen) == 10 and all(s.num_images == 100 for s in plan.specs)
+        smoke_cap = {(s.model, s.problem): s.flower_cg_max_iters for s in smoke
+                     if s.method == "flower"}
+        results.append(report("freeze: winner inside the grid, CG cap carried",
+                              chosen == want and all(s.num_images == 100 for s in plan.specs)
                               and all(s.expected_backprops == 0 for s in plan.specs)
+                              and text.count("flower_cg_max_iters:") == 2
+                              and "flower_cg_max_iters: 100" in text
+                              and smoke_cap[("jit", "deblur")] == 100
                               and len(smoke) == 20 and all(s.num_images == 2 for s in smoke),
-                              "pMF -> N=200, JiT -> N=500 on every task; the off-grid N=1000 "
-                              "(LPIPS 0.10) is refused; 100-image config + 2-image smoke"))
+                              "pMF (200, cap 50), JiT (500; deblurring cap 100 written into the "
+                              "100-image and smoke configs); off-grid N=1000 and cap 200 lose"))
 
         bad = list(r2_rows)
         bad[0] = dict(bad[0], flower_gamma=1, lpips=0.01, num_flower_steps=100)
         write_results(tmp / "flower_bad", bad)
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                gen.main(["freeze", "--from", str(tmp / "flower_bad"), "--grid",
-                          str(tmp / "flower_screen"), "--out", str(tmp / "bad.yaml")])
-            refused, msg = False, "accepted"
-        except SystemExit as exc:
-            refused, msg = "flower_gamma=1" in str(exc), str(exc)[:80]
-        results.append(report("freeze refuses an off-protocol winner", refused, msg))
+        bad_cap = [dict(r, lpips=0.01) if r["problem"] == "denoising" and
+                   r["num_flower_steps"] == 200 and r["model"] == "pmf" else r for r in r2_rows]
+        bad_cap = [dict(r, flower_cg_max_iters=100) if r["lpips"] == 0.01 else r for r in bad_cap]
+        write_results(tmp / "flower_bad_cap", bad_cap)
+        refusals = []
+        for run_dir, needle in (("flower_bad", "flower_gamma=1"), ("flower_bad_cap", "CG 100")):
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    gen.main(["freeze", "--from", str(tmp / run_dir), "--grid",
+                              str(tmp / "flower_screen"), "--out", str(tmp / "bad.yaml")])
+                refusals.append((False, "accepted"))
+            except SystemExit as exc:
+                refusals.append((needle in str(exc), str(exc)[:70]))
+        results.append(report("freeze refuses an off-protocol winner",
+                              all(ok for ok, _ in refusals),
+                              "gamma=1: %s | cap 100 off deblurring: %s"
+                              % (refusals[0][1][:40], refusals[1][1][:40])))
 
         # finalize still demands all six benchmark methods; Flower rows do not satisfy it
         try:

@@ -1,10 +1,14 @@
 #!/usr/bin/env python
 """Flower on the pixel priors (pMF-L/16, JiT-B/16): the configurations for rebuttal Task 3.
 
-Flower has one tuned knob, the iteration count N = `num_flower_steps`, screened over the
-pre-registered values {50, 100, 200, 500} (the paper uses 100 to 500) at t0 = 1 with the
-paper's reported gamma = 0 and its CG settings.  Each prior is tuned on its own screen and
-frozen from its own results; nothing is carried from one prior to the other.
+Flower's tuned knobs are the iteration count N = `num_flower_steps`, screened over the
+pre-registered values {50, 100, 200, 500} (the paper uses 100 to 500), and, for deblurring
+only, the conjugate-gradient cap `flower_cg_max_iters` over {50, 100}: 50 is the paper's
+setting, and at the benchmark's sigma = 0.05 the early, ill-conditioned blur solves need
+roughly 60-80 iterations to reach the 1e-5 tolerance.  Every other task's refinement is
+closed form, so the cap does not exist there.  All runs use t0 = 1, the paper's reported
+gamma = 0 and its CG tolerance.  Each prior is tuned on its own screen and frozen from its
+own results; nothing is carried from one prior to the other.
 
     # 1. the screening grid (4 images) and its 2-image smoke variant
     python scripts/make_flower_configs.py screen
@@ -13,7 +17,7 @@ frozen from its own results; nothing is carried from one prior to the other.
 
     # 2. a refine round at 8 images that cannot leave the screened grid
     python scripts/hpo.py propose --from outputs/flower_pmf --models pmf --images 8 --no-paper \
-        --lock flower=num_flower_steps --out configs/flower_round2_pmf.yaml
+        --lock flower=num_flower_steps,flower_cg_max_iters --out configs/flower_round2_pmf.yaml
     python run.py --config configs/flower_round2_pmf.yaml --run-id flower_pmf_r2 --no-figures
 
     # 3. freeze: lowest LPIPS at 8 images inside the screened grid -> the 100-image evaluation
@@ -26,8 +30,9 @@ tests Flower's pairing instead of passing for want of a partner.
 
 `freeze` is the rule of `make_matched_configs.py freeze` (hpo.restrict + hpo.winners: the
 lowest LPIPS inside the screened grid), used because `hpo.py finalize` expects all six
-benchmark methods in every cell.  It refuses a winner outside the pre-registered N values or
-run with a non-default gamma / CG setting.
+benchmark methods in every cell.  It refuses a winner outside the pre-registered N values
+(or, for deblurring, CG caps), or run with a non-default gamma, CG tolerance or -- off the
+deblurring task -- CG cap, and it writes the selected deblurring cap into the frozen config.
 """
 import argparse
 import importlib.util
@@ -50,6 +55,8 @@ MODELS = ["pmf", "jit"]                 # pixel priors only: Flower refines the 
 METHOD = "flower"
 SCREEN_STEPS = [50, 100, 200, 500]
 SMOKE_STEPS = SCREEN_STEPS[0]
+# The CG cap is screened only where CG runs (hpo.KNOB_PROBLEMS says the same to the ranking).
+SCREEN_CG = {"deblur": [50, 100]}
 # The paper's reported setting; written into no config (they are the builtin defaults), but
 # a winner that ran with anything else was not screened under this protocol.
 DEFAULT_GAMMA, DEFAULT_CG_MAX_ITERS, DEFAULT_CG_TOL = 0, 50, 1e-5
@@ -70,8 +77,11 @@ def sdedit_entry(benchmark, model, problem):
     return fields
 
 
-def flower_fields(steps):
-    return [("t0", "1.0"), ("num_flower_steps", steps)]
+def flower_fields(steps, cg_max_iters=None):
+    fields = [("t0", "1.0"), ("num_flower_steps", steps)]
+    if cg_max_iters is not None:
+        fields.append(("flower_cg_max_iters", cg_max_iters))
+    return fields
 
 
 def experiment_block_multi(name, problem, num_images, per_model):
@@ -97,12 +107,13 @@ def write(out, smoke, models, lines, n_jobs, title, usage, text, pool, save_imag
 # screen
 # =====================================================================================
 SCREEN_TEXT = """Screening grid for Flower (Pourya, El Rawas and Unser, ICLR 2026) on the two pixel
-priors.  One tuned knob, num_flower_steps over the pre-registered %s, at t0 = 1
-with gamma = 0 (the paper's reported setting) and conjugate gradient for deblurring at the
-paper's limits (50 iterations, relative residual 1e-5).  Flower never backpropagates
-through the prior: N network evaluations and 0 backprops per image.  Each prior is
-screened and selected on its own results.  Selection: lowest LPIPS on 8 tuning images
-inside this grid (scripts/hpo.py propose --lock flower=num_flower_steps, then
+priors.  Tuned: num_flower_steps over the pre-registered %s and, for deblurring
+only, the conjugate-gradient cap flower_cg_max_iters over %s (relative residual 1e-5, the
+paper's tolerance; every other task's refinement is closed form).  t0 = 1 and gamma = 0
+(the paper's reported setting).  Flower never backpropagates through the prior: N network
+evaluations and 0 backprops per image.  Each prior is screened and selected on its own
+results.  Selection: lowest LPIPS on 8 tuning images inside this grid (scripts/hpo.py
+propose --lock flower=num_flower_steps,flower_cg_max_iters, then
 scripts/make_flower_configs.py freeze).
 Generated by scripts/make_flower_configs.py screen; %d atomic jobs over both priors."""
 
@@ -114,8 +125,10 @@ def screen_lines(benchmark, smoke):
         per_model = []
         for model in MODELS:
             steps = SMOKE_STEPS if smoke else list(SCREEN_STEPS)
-            jobs = 1 if smoke else len(SCREEN_STEPS)
-            methods = [(METHOD, flower_fields(steps),
+            caps = SCREEN_CG.get(problem)
+            cg = None if caps is None else (caps[0] if smoke else list(caps))
+            jobs = 1 if smoke else len(SCREEN_STEPS) * (len(caps) if caps else 1)
+            methods = [(METHOD, flower_fields(steps, cg),
                         "N evals, 0 BP per image; %d job%s" % (jobs, "" if jobs == 1 else "s"))]
             n_jobs += jobs
             if smoke:
@@ -138,9 +151,10 @@ def screen(a):
         usage = ("#   python run.py --config %s --models <prior> --run-id flower_<prior> --no-figures\n"
                  "#   one prior per job: every block carries per-model entries, and --models drops the rest\n"
                  % out)
-        text = SCREEN_TEXT % (SCREEN_STEPS, n_jobs)
+        text = SCREEN_TEXT % (SCREEN_STEPS, SCREEN_CG["deblur"], n_jobs)
         if smoke:
-            text += ("\nSmoke variant: N = %d only, next to each prior's frozen SDEdit from %s,\n"
+            text += ("\nSmoke variant: N = %d (deblurring CG cap 50) only, next to each prior's\n"
+                     "frozen SDEdit from %s,\n"
                      "so the shared_initial_state check compares two methods at t0 = 1.  It checks\n"
                      "that every task resolves, runs and pairs, not which N wins."
                      % (SMOKE_STEPS, a.benchmark))
@@ -165,7 +179,8 @@ def _as_float(v):
 
 
 def frozen_winners(runs_from, runs_grid, models):
-    """(model, problem) -> (N, entry, candidates beaten), refusing anything off-protocol."""
+    """(model, problem) -> (N, CG cap or None, entry, candidates beaten), refusing anything
+    off-protocol."""
     ranked, _, _ = hpo.load(runs_from)
     grids = hpo.load(runs_grid)[1]
     best = hpo.winners(hpo.restrict(ranked, models, grids))
@@ -176,7 +191,8 @@ def frozen_winners(runs_from, runs_grid, models):
             if cell not in best:
                 raise SystemExit("no Flower winner for %s inside the screened grid" % "/".join(cell))
             key, entry, n_candidates = best[cell]
-            steps = int(round(key[0]))
+            knobs = dict(zip(hpo.KNOBS[METHOD], key))
+            steps = int(round(knobs["num_flower_steps"]))
             if steps not in SCREEN_STEPS:
                 raise SystemExit("%s: winner N=%d is not one of the pre-registered %s"
                                  % ("/".join(cell), steps, SCREEN_STEPS))
@@ -184,14 +200,22 @@ def frozen_winners(runs_from, runs_grid, models):
             gamma = _as_int(row.get("flower_gamma"))
             iters = _as_int(row.get("flower_cg_max_iters"))
             tol = _as_float(row.get("flower_cg_tol"))
-            if gamma != DEFAULT_GAMMA or iters != DEFAULT_CG_MAX_ITERS or (
+            caps = SCREEN_CG.get(problem)
+            cap = None
+            if caps is not None:
+                cap = _as_int(knobs["flower_cg_max_iters"])
+                if cap not in caps:
+                    raise SystemExit("%s: winner flower_cg_max_iters=%s is not one of the "
+                                     "pre-registered %s" % ("/".join(cell), cap, caps))
+            allowed_iters = caps if caps is not None else [DEFAULT_CG_MAX_ITERS]
+            if gamma != DEFAULT_GAMMA or iters not in allowed_iters or (
                     tol is None or abs(tol - DEFAULT_CG_TOL) > 1e-12):
                 raise SystemExit("%s: winner ran with flower_gamma=%s, CG %s/%s; the screen uses "
                                  "gamma=%d and CG %d/%g"
                                  % ("/".join(cell), row.get("flower_gamma"),
                                     row.get("flower_cg_max_iters"), row.get("flower_cg_tol"),
                                     DEFAULT_GAMMA, DEFAULT_CG_MAX_ITERS, DEFAULT_CG_TOL))
-            out[(model, problem)] = (steps, entry, n_candidates)
+            out[(model, problem)] = (steps, cap, entry, n_candidates)
     return out
 
 
@@ -211,10 +235,10 @@ def freeze(a):
         for problem in hpo.PROBLEMS:
             per_model = []
             for model in models:
-                steps, entry, n_candidates = best[(model, problem)]
+                steps, cap, entry, n_candidates = best[(model, problem)]
                 comment = ("LPIPS %.4f PSNR %.2f at %d tuning images, best of %d"
                            % (entry["lpips"], entry["psnr"] or 0.0, entry["n"], n_candidates))
-                methods = [(METHOD, flower_fields(steps), comment)]
+                methods = [(METHOD, flower_fields(steps, cap), comment)]
                 if smoke:
                     methods.insert(0, ("sdedit", sdedit_entry(benchmark, model, problem),
                                        "pairing partner: this prior's frozen SDEdit"))
@@ -228,11 +252,12 @@ def freeze(a):
         usage = ("#   python scripts/build_local_imagenet_pool.py --frozen-manifest "
                  "benchmarks/imagenet100_c42_i43/manifest.csv\n"
                  "#   python run.py --config %s --models <prior> --run-id <id> --no-figures\n" % out)
-        text = ("Each entry is the lowest-LPIPS num_flower_steps of its (prior, task) cell among\n"
-                "the candidates inside that prior's own screened grid %s (the trailing\n"
-                "comment), with gamma = 0 and the paper's CG settings.\n"
+        text = ("Each entry is the lowest-LPIPS configuration of its (prior, task) cell among\n"
+                "the candidates inside that prior's own screened grid: num_flower_steps in %s\n"
+                "and, for deblurring, flower_cg_max_iters in %s (the trailing comment).\n"
+                "gamma = 0 and the CG tolerance 1e-5 throughout.\n"
                 "Generated by scripts/make_flower_configs.py freeze from %s."
-                % (SCREEN_STEPS, stems))
+                % (SCREEN_STEPS, SCREEN_CG["deblur"], stems))
         write(out, smoke, models, lines, n_jobs, title, usage, text, matched.FROZEN_POOL, not smoke)
 
 

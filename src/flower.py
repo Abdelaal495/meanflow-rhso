@@ -61,8 +61,12 @@ linear solve gives mu_t + gamma kappa_t.
     denoising, inpainting, strided SR   H^T H = diag(d), d = H^T(H(1)): closed form
     deblurring (separable, reflect)     not diagonal: per-image conjugate gradient
 
-The CG step sizes and stopping test are PER IMAGE, so an image's result does not depend on
-which other images share its batch.
+CG is warm-started at the destination x_hat (the solution as rho -> 0), and its step sizes
+and stopping test are PER IMAGE, so an image's result does not depend on which other images
+share its batch.  The cap `flower_cg_max_iters` defaults to the paper's 50; at the
+benchmark's sigma = 0.05 the early blur solves (condition number ~ 1 + rho, rho = 400 at
+t = 0) need roughly 60-80 iterations to reach 1e-5, which is why the deblurring screen also
+tries 100.
 
 Compute semantics
 -----------------
@@ -370,6 +374,7 @@ class FlowerRefinement:
         def apply_A(v):
             return v + rho * ops.Ht(ops.H(v), v)
 
+        # warm start at x_hat: with max_iters = 0 the refinement returns x_hat itself
         x, iters, residual = conjugate_gradient(ops, apply_A, rhs, x_hat,
                                                 self.cg_max_iters, self.cg_tol)
         self.last_iterations, self.last_residual = iters, residual
