@@ -5,6 +5,7 @@ Appendix C).
     python -u toy/hexagon_study.py train --model flow_matching    # one model per run, cached
     python -u toy/hexagon_study.py train --model meanflow_p0
     python -u toy/hexagon_study.py train --model meanflow_p0.5
+    python -u toy/hexagon_study.py train --model imeanflow         # iMF objective (v-loss)
     python -u toy/hexagon_study.py stage1                          # sanity table
 
 Training needs CUDA (`--device cuda`, the default) and stops at once when it is missing.  It
@@ -46,7 +47,8 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import MeanFlowMLP, VelocityMLP, freeze, train_flow_matching, train_meanflow  # noqa: E402
+from common import (MeanFlowMLP, VelocityMLP, freeze, train_flow_matching,  # noqa: E402
+                    train_imeanflow, train_meanflow)
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / "cache" / "hexagon"
@@ -62,7 +64,15 @@ WIDTH, DEPTH = 256, 4
 TRAIN_SEED, TRAIN_STEPS, TRAIN_BATCH, TRAIN_POOL = 0, 30_000, 1024, 1_000_000
 SWEEP_P = (0.0, 0.5)
 MODELS = {"flow_matching": ("flow_matching", None),
-          **{"meanflow_p%g" % p: ("meanflow", p) for p in SWEEP_P}}
+          **{"meanflow_p%g" % p: ("meanflow", p) for p in SWEEP_P},
+          "imeanflow": ("imeanflow", None)}
+# the one-jump priors in the stage-1 table: model name -> label
+MEANFLOW_LABELS = {**{"meanflow_p%g" % p: "MeanFlow p=%g" % p for p in SWEEP_P},
+                   "imeanflow": "iMF"}
+# pass criteria (those of the Gaussian-mixture study that apply in 2-D; its low-signal
+# variance ratio has no counterpart here): one-step sliced W2 at most ONE_STEP_SW2_MAX, and
+# 8-step sliced W2 within EIGHT_STEP_RATIO_MAX of flow-matching Heun-100
+ONE_STEP_SW2_MAX, EIGHT_STEP_RATIO_MAX = 0.05, 1.5
 PROGRESS_EVERY = 1000
 JUMP_TIMES = (0.25, 0.5, 0.75)
 NEAR = 0.05
@@ -155,7 +165,8 @@ def _cache_path(kind: str, steps: int, batch: int, p: float = None) -> Path:
 
 def load_or_train(kind: str, steps: int, batch: int, device: str, p: float = None,
                   retrain: bool = False, verbose: bool = True):
-    """kind 'flow_matching' or 'meanflow' (adaptive exponent p).  Returns (model, info).
+    """kind 'flow_matching', 'meanflow' (adaptive exponent p) or 'imeanflow' (iMF v-loss).
+    Returns (model, info).
     Training logs to outputs/hexagon_study/train_<model>.log (see ProgressLog)."""
     path = _cache_path(kind, steps, batch, p)
     cls = VelocityMLP if kind == "flow_matching" else MeanFlowMLP
@@ -169,7 +180,7 @@ def load_or_train(kind: str, steps: int, batch: int, device: str, p: float = Non
     torch.manual_seed(TRAIN_SEED)
     model = cls(dim=2, width=WIDTH, depth=DEPTH).to(device)
     data_fn = lambda rng: sample(TRAIN_POOL, rng).astype(np.float32)
-    name = kind if p is None else "meanflow_p%g" % p
+    name = kind if p is None else "%s_p%g" % (kind, p)
     log = ProgressLog(name, steps, OUT / ("train_%s.log" % name))
     log.line("%s  training %s: %d steps, batch %d, width %d, depth %d, %s"
              % (time.strftime("%Y-%m-%d %H:%M:%S"), name, steps, batch, WIDTH, DEPTH, device))
@@ -177,6 +188,9 @@ def load_or_train(kind: str, steps: int, batch: int, device: str, p: float = Non
     if kind == "flow_matching":
         trained = train_flow_matching(model, data_fn, steps, batch, TRAIN_SEED, verbose=False,
                                       log_every=1000, log=log)
+    elif kind == "imeanflow":
+        trained = train_imeanflow(model, data_fn, steps, batch, TRAIN_SEED, verbose=False,
+                                  log_every=1000, log=log)
     else:
         trained = train_meanflow(model, data_fn, steps, batch, TRAIN_SEED, adaptive_p=p,
                                  verbose=False, log_every=1000, log=log)
@@ -185,7 +199,9 @@ def load_or_train(kind: str, steps: int, batch: int, device: str, p: float = Non
     seconds = time.perf_counter() - started
     info = dict(kind=kind, steps=steps, batch=batch, width=WIDTH, depth=DEPTH, seed=TRAIN_SEED,
                 adaptive_p=p, seconds=seconds, device=str(device), log=list(log),
-                recipe="Adam 3e-4, 500 warm-up + cosine, grad clip 1, EMA 0.999")
+                recipe="Adam 3e-4, 500 warm-up + cosine, grad clip 1, EMA 0.999"
+                + ("; iMF v-loss, logit-normal times, s != t on half the batch"
+                   if kind == "imeanflow" else ""))
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"model": {k: v.cpu() for k, v in trained.state_dict().items()}, "info": info}, path)
     log.line("%s  saved %s (%.0f s, %.1f ms/step)" % (time.strftime("%H:%M:%S"), path.name,
@@ -241,8 +257,11 @@ def stage1(args) -> Dict:
     require_cuda(device)
     fm, fm_info = load_or_train("flow_matching", args.steps, args.batch, device,
                                 retrain=args.retrain)
-    mfs = {p: load_or_train("meanflow", args.steps, args.batch, device, p=p, retrain=args.retrain)
-           for p in SWEEP_P}
+    mfs = {}
+    for name, label in MEANFLOW_LABELS.items():
+        kind, p = MODELS[name]
+        mfs[label] = load_or_train(kind, args.steps, args.batch, device, p=p,
+                                   retrain=args.retrain) + (name,)
 
     n = args.samples
     rng = np.random.default_rng(1)
@@ -255,10 +274,10 @@ def stage1(args) -> Dict:
     rows = [dict(sampler="data (second sample)", prior="", **describe(truth2, truth))]
     rows.append(dict(sampler="Heun 100 steps", prior="flow matching",
                      **describe(np64(fm_sample(fm, dev(x0), 100)), truth)))
-    for p, (mf, _) in mfs.items():
+    for label, (mf, _, _) in mfs.items():
         for k in (1, 2, 8):
             rows.append(dict(sampler="%d step%s" % (k, "" if k == 1 else "s"),
-                             prior="MeanFlow p=%g" % p,
+                             prior=label,
                              **describe(np64(mf_sample(mf, dev(x0), k)), truth)))
     for t in JUMP_TIMES:
         xt = (1 - t) * x0 + t * x1
@@ -266,13 +285,21 @@ def stage1(args) -> Dict:
         ref = np64(fm_sample(fm, dev(xt), heun, t0=t))
         rows.append(dict(sampler="Heun %d steps from t=%g" % (heun, t), prior="flow matching",
                          **describe(ref, truth)))
-        for p, (mf, _) in mfs.items():
+        for label, (mf, _, _) in mfs.items():
             out = np64(mf_transition(mf, dev(xt), t, 1.0))
-            rows.append(dict(sampler="1 jump T(x; %g -> 1)" % t, prior="MeanFlow p=%g" % p,
+            rows.append(dict(sampler="1 jump T(x; %g -> 1)" % t, prior=label,
                              gap_to_fm=float(np.sqrt(((out - ref) ** 2).sum(1).mean())),
                              **describe(out, truth)))
     floor = rows[0]["sliced_w2"]
-    infos = dict(flow_matching=fm_info, **{"meanflow_p%g" % p: info for p, (_, info) in mfs.items()})
+    infos = dict(flow_matching=fm_info, **{name: info for _, info, name in mfs.values()})
+    fm_heun = rows[1]["sliced_w2"]
+    criteria = []
+    for label in mfs:
+        sw = {r["sampler"]: r["sliced_w2"] for r in rows if r["prior"] == label}
+        one, eight = sw["1 step"], sw["8 steps"]
+        criteria.append(dict(prior=label, one_step_sw2=one, one_step_pass=one <= ONE_STEP_SW2_MAX,
+                             eight_step_sw2=eight, eight_step_over_fm_heun=eight / fm_heun,
+                             eight_step_pass=eight <= EIGHT_STEP_RATIO_MAX * fm_heun))
 
     print("\nsanity checks on %d samples (same noise for every sampler); sliced W2 floor %.4f"
           % (n, floor))
@@ -283,6 +310,14 @@ def stage1(args) -> Dict:
             r["prior"], r["sampler"], r["sliced_w2"], r["dist_mean"], r["dist_median"],
             r["dist_p90"], r["dist_p99"], r["near_share"],
             "%.4f" % r["gap_to_fm"] if "gap_to_fm" in r else ""))
+    print("\npass criteria: one-step SW2 <= %.2f; 8-step SW2 <= %.1fx flow-matching Heun-100 (%.4f)"
+          % (ONE_STEP_SW2_MAX, EIGHT_STEP_RATIO_MAX, fm_heun))
+    for c in criteria:
+        print("  %-15s one-step SW2 %.4f %s   8-step SW2 %.4f = %.1fx FM %s   overall %s"
+              % (c["prior"], c["one_step_sw2"], "PASS" if c["one_step_pass"] else "FAIL",
+                 c["eight_step_sw2"], c["eight_step_over_fm_heun"],
+                 "PASS" if c["eight_step_pass"] else "FAIL",
+                 "PASS" if c["one_step_pass"] and c["eight_step_pass"] else "FAIL"))
     for name, info in infos.items():
         print("  training %-16s %5.0f s  (%d steps, batch %d, %.1f ms/step, %s)"
               % (name, info["seconds"], info["steps"], info["batch"],
@@ -297,12 +332,16 @@ def stage1(args) -> Dict:
         w.writeheader()
         for r in rows:
             w.writerow({c: r.get(c, "") for c in cols})
+    with open(out / "criteria.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(criteria[0]))
+        w.writeheader()
+        w.writerows(criteria)
     (out / "sanity.json").write_text(json.dumps(dict(
-        samples=n, sliced_w2_floor=floor, rows=rows,
+        samples=n, sliced_w2_floor=floor, rows=rows, criteria=criteria,
         training={k: {kk: vv for kk, vv in v.items() if kk != "log"} for k, v in infos.items()}),
         indent=2))
     _plot(out, fm, mfs, x0[:4000], truth[:4000], device, infos)
-    print("wrote %s (sanity.csv, sanity.json, samples.png, training_curves.png)" % out)
+    print("wrote %s (sanity.csv, criteria.csv, sanity.json, samples.png, training_curves.png)" % out)
     return dict(rows=rows, floor=floor)
 
 
@@ -312,10 +351,15 @@ def _plot(out: Path, fm, mfs, x0, truth, device, infos) -> None:
     import matplotlib.pyplot as plt
     dev = lambda a: torch.from_numpy(a.astype(np.float32)).to(device)
     panels = [("data", truth), ("FM Heun 100", fm_sample(fm, dev(x0), 100).cpu().numpy())]
-    for p, (mf, _) in mfs.items():
-        panels += [("MF p=%g, 1 step" % p, mf_sample(mf, dev(x0), 1).cpu().numpy()),
-                   ("MF p=%g, 8 steps" % p, mf_sample(mf, dev(x0), 8).cpu().numpy())]
-    fig, axes = plt.subplots(1, len(panels), figsize=(3 * len(panels), 3.1))
+    for label, (mf, _, _) in mfs.items():
+        panels += [("%s, 1 step" % label, mf_sample(mf, dev(x0), 1).cpu().numpy()),
+                   ("%s, 8 steps" % label, mf_sample(mf, dev(x0), 8).cpu().numpy())]
+    cols = 4
+    rows_ = -(-len(panels) // cols)
+    fig, axes = plt.subplots(rows_, cols, figsize=(3 * cols, 3.1 * rows_))
+    axes = axes.ravel()
+    for ax in axes[len(panels):]:
+        ax.axis("off")
     hexagon = np.vstack([VERTICES, VERTICES[:1]])
     for ax, (title, pts) in zip(axes, panels):
         ax.plot(hexagon[:, 0], hexagon[:, 1], color="0.6", lw=0.8)

@@ -20,7 +20,14 @@ Checks, with no trained model involved:
    the batch replay reproduces common.train_meanflow's own batches (a learning rate of 0
    keeps the model at its initialisation, so its logged raw error must be recomputed
    exactly), and the closed form |dPhi/dz (v - v*)|^2 equals the error of the exact average
-   velocity against the target built by finite differences, as the trainer builds it.
+   velocity against the target built by finite differences, as the trainer builds it;
+7. the sign of iMF's velocity prediction (common.imeanflow_prediction, used by
+   common.train_imeanflow): with the EXACT average velocity u (an RK4 solve of the exact
+   velocity, differentiable in z, t and s) in place of the network and the exact marginal
+   velocity v as the JVP tangent, V = u - (s - t) du/dt equals v up to RK4 error, including
+   the jump from t = 0 to s = 1, and the flipped sign does not; iMF's time sampling, in
+   this repo's convention, gives s >= t, s != t on half the batch, and logit-normal(0.4, 1)
+   times.
 """
 
 import sys
@@ -244,6 +251,79 @@ def check_floor(mix):
            % (rel, conv))
 
 
+def _torch_velocity_rows(mix):
+    """The exact velocity in torch float64, one time per row, differentiable in x and t."""
+    import torch
+    lam, vec = mix.eig()
+    W, M = torch.tensor(np.log(mix.weights)), torch.tensor(mix.means)
+    LAM, VEC = torch.tensor(lam), torch.tensor(vec)
+    MC = torch.einsum("kd,kde->ke", M, VEC)
+
+    def vel(x, t):
+        tt = t[:, None, None]
+        z = torch.einsum("nd,kde->nke", x, VEC) - tt * MC[None]
+        denom = tt * tt * LAM[None] + (1 - tt) ** 2
+        logits = W[None] - 0.5 * (z * z / denom).sum(-1) - 0.5 * torch.log(denom).sum(-1)
+        r = torch.softmax(logits, 1)
+        terms = M[None] + torch.einsum("nke,kde->nkd", z * (tt * LAM[None] - (1 - tt)) / denom, VEC)
+        return torch.einsum("nk,nkd->nd", r, terms)
+    return vel
+
+
+def check_imf_sign(mix):
+    print("\n7. the sign of iMF's velocity prediction")
+    import torch
+    from common import IMF_SIGN, imeanflow_prediction, imeanflow_times
+    vel = _torch_velocity_rows(mix)
+    rng = np.random.default_rng(7)
+    x = rng.standard_normal((64, mix.d)) * 1.5
+    t = rng.uniform(0, 1, 64)
+    port = vel(torch.tensor(x), torch.tensor(t)).numpy()
+    report("torch velocity = exact_velocity_rows", np.abs(port - G.exact_velocity_rows(mix, x, t)).max() < 1e-12,
+           "max difference %.1e" % np.abs(port - G.exact_velocity_rows(mix, x, t)).max())
+
+    def u_exact(z, t, s, steps=64):
+        span, h, y = (s - t)[:, None], 1.0 / steps, z
+        f = lambda y_, tau: span * vel(y_, t + tau * (s - t))
+        for k in range(steps):
+            a = k * h
+            k1 = f(y, a); k2 = f(y + 0.5 * h * k1, a + 0.5 * h)
+            k3 = f(y + 0.5 * h * k2, a + 0.5 * h); k4 = f(y + h * k3, a + h)
+            y = y + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        return (y - z) / span
+
+    n = 64
+    tr = rng.uniform(0, 1, n)
+    cases = [("random t < s", tr, tr + (1 - tr) * rng.uniform(0.05, 1, n)),
+             ("t = 0, s = 1", np.zeros(n), np.ones(n)),
+             ("t = 0.5, s = 1", np.full(n, 0.5), np.ones(n))]
+    worst, flipped_best = 0.0, np.inf
+    for _, tc, sc in cases:
+        x0 = rng.standard_normal((n, mix.d))
+        x1 = mix.sample(n, rng)[0]
+        z = torch.tensor((1 - tc)[:, None] * x0 + tc[:, None] * x1)
+        T, S = torch.tensor(tc), torch.tensor(sc)
+        v = vel(z, T)
+        V, u, dudt = imeanflow_prediction(u_exact, z, T, S, v)
+        flipped = u - IMF_SIGN * (S - T)[:, None] * dudt
+        worst = max(worst, float(((V - v).norm(dim=1) / v.norm(dim=1)).max()))
+        flipped_best = min(flipped_best, float(((flipped - v).norm(dim=1) / v.norm(dim=1)).median()))
+    report("V = u - (s - t) du/dt equals v (exact flow)", IMF_SIGN == -1.0 and worst < 1e-4
+           and flipped_best > 0.1,
+           "max rel. error %.1e (RK4 64; random t < s, 0 -> 1, 0.5 -> 1); flipped sign >= %.2f"
+           % (worst, flipped_best))
+
+    torch.manual_seed(0)
+    t, s = imeanflow_times(200_000, "cpu")
+    long = s != t
+    pooled = torch.cat([t[long], s[long]])
+    logit = torch.log(pooled / (1 - pooled))
+    report("iMF time sampling", bool((s >= t).all()) and abs(long.double().mean().item() - 0.5) < 0.005
+           and abs(logit.mean().item() - 0.4) < 0.01 and abs(logit.std().item() - 1.0) < 0.01,
+           "s != t on %.3f; logit of the times: mean %.3f, std %.3f"
+           % (long.double().mean().item(), logit.mean().item(), logit.std().item()))
+
+
 def main():
     mix = G.make_mixture()
     check_mixture(mix)
@@ -252,6 +332,7 @@ def main():
     check_flow(mix)
     check_refactor()
     check_floor(mix)
+    check_imf_sign(mix)
     print("\n%d/%d checks passed" % (sum(RESULTS), len(RESULTS)))
     return 0 if all(RESULTS) else 1
 

@@ -240,7 +240,13 @@ floor; that `toy/common.py` reproduces the pre-refactor two-moons trainers bit f
 target: the per-row exact velocity equals the scalar one, the batch replay reproduces
 `train_meanflow`'s own batches (at learning rate 0 the logged raw error is recomputed
 exactly), and the closed form |dPhi/dz (v - v*)|^2 matches the exact average velocity's
-error against a finite-difference target built the way the trainer builds it.
+error against a finite-difference target built the way the trainer builds it. It also checks
+the sign of iMF's velocity prediction (`common.imeanflow_prediction`, used by
+`train_imeanflow`). With the exact average velocity (a differentiable RK4 solve of the exact
+velocity) in place of the network, and the exact marginal velocity as the JVP tangent,
+V = u - (s - t) du/dt equals v up to RK4 error, including the jump from t = 0 to s = 1. The
+flipped sign fails. iMF's time sampling, in this repo's convention, gives s >= t, s != t on
+half the batch, and logit-normal(0.4, 1) times.
 
 `test_gmm_solvers.py` covers the paused oracle stage 2 of the mixture study, on the CPU in
 float64: the torch exact velocity against the numpy one, the direct endpoint against the

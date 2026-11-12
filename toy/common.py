@@ -16,6 +16,9 @@ the objective differs, as each family requires:
     train_flow_matching   v_theta(x_t, t)      -> v                       (plain regression)
     train_meanflow        u_theta(x_t, t, s)   -> v + (s - t) du/dt       (MeanFlow identity,
                           one JVP, adaptive weighting, interval curriculum)
+    train_imeanflow       u_theta(x_t, t, s)   iMF v-loss: u - (s - t) sg(du/dt) -> v, the
+                          JVP along the model's own velocity (added for the hexagon study;
+                          the two trainers above are unchanged)
 """
 import math
 import time
@@ -195,6 +198,99 @@ def train_flow_matching(model: VelocityMLP, data_fn: DataFn, steps: int, batch: 
                                 seconds=elapsed))
             if verbose:
                 print("  step %5d  flow-matching mse %.4f  (%.0fs)" % (step, loss.item(), elapsed))
+    return ema
+
+
+# iMF's sign in this file's convention.  With t = 0 noise and s >= t, the average velocity
+# u(z, t, s) of the flow obeys u - (s - t) du/dt = v(z, t) along the flow (du/dt with tangent
+# (v, 1, 0) for (z, t, s)), so V = u + IMF_SIGN (s - t) du/dt recovers v exactly with
+# IMF_SIGN = -1.  (iMF writes V = u + (t - r) du/dt with t the noisier time and r <= t; the
+# reversed time direction flips the sign.)  tests/test_gmm_study.py checks this against the
+# exact flow of a Gaussian mixture.
+IMF_SIGN = -1.0
+
+
+def imeanflow_times(batch: int, device, long_share: float = 0.5, logit_mean: float = -0.4,
+                    logit_std: float = 1.0):
+    """iMF's (t, s) sampling, in this file's time convention.
+
+    iMF draws two times from logit-normal(logit_mean, logit_std) with its time running from
+    data (0) to noise (1), takes the larger as the start t and the smaller as the end r, and
+    sets r = t on the share of the batch not used for long jumps.  Here a time tau in iMF's
+    convention is 1 - tau, so the start is the SMALLER converted time and the end the larger;
+    1 - sigmoid(n) = sigmoid(-n) makes each converted time logit-normal(-logit_mean,
+    logit_std).  Returns (t, s) with s >= t and s != t on `long_share` of the batch.
+    """
+    a = torch.sigmoid(-(logit_mean + logit_std * torch.randn(batch, device=device)))
+    b = torch.sigmoid(-(logit_mean + logit_std * torch.randn(batch, device=device)))
+    t, s = torch.minimum(a, b), torch.maximum(a, b)
+    long = torch.rand(batch, device=device) < long_share
+    return t, torch.where(long, s, t)
+
+
+def imeanflow_prediction(fn: Callable, z: torch.Tensor, t: torch.Tensor, s: torch.Tensor,
+                         v_tangent: torch.Tensor):
+    """iMF's velocity prediction V = u + IMF_SIGN (s - t) sg(du/dt), du/dt = JVP of
+    fn(z, t, s) with tangent (v_tangent, 1, 0).  Returns (V, u, du/dt)."""
+    u, dudt = torch.func.jvp(fn, (z, t, s),
+                             (v_tangent, torch.ones_like(t), torch.zeros_like(s)))
+    return u + IMF_SIGN * (s - t)[:, None] * dudt.detach(), u, dudt
+
+
+def train_imeanflow(model: MeanFlowMLP, data_fn: DataFn, steps: int, batch: int, seed: int,
+                    lr: float = 3e-4, warmup: int = 500, ema_decay: float = 0.999,
+                    clip: float = 1.0, verbose: bool = True, log_every: int = 1000,
+                    log: Optional[List[dict]] = None, long_share: float = 0.5,
+                    logit_mean: float = -0.4, logit_std: float = 1.0) -> MeanFlowMLP:
+    """iMF objective (Geng et al. 2026, arXiv 2512.02012, Algorithm 1), the v-loss, in this
+    file's convention, with the recipe of the other two trainers (Adam, warm-up + cosine,
+    grad clip, EMA).
+
+        v_theta = sg(u_theta(z, t, t))                          the model's own velocity
+        V       = u_theta(z, t, s) - (s - t) sg(du/dt),        du/dt along (v_theta, 1, 0)
+        loss    = |V - (x1 - x0)|^2                             plain squared error
+
+    The JVP tangent is the model's marginal-velocity estimate, not the conditional x1 - x0
+    of train_meanflow, so the conditional velocity's variance is not magnified by the JVP.
+    Times: imeanflow_times (logit-normal, s != t on `long_share` of the batch); no interval
+    curriculum and no adaptive weighting.  Logs the loss and the raw MeanFlow-identity
+    residual |u - v_theta - (s - t) du/dt|^2 on the long pairs.
+    """
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+    device = next(model.parameters()).device
+    data = torch.from_numpy(data_fn(rng)).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    sched = _schedule(opt, steps, warmup)
+    ema = _same_architecture(model)
+    ema.load_state_dict(model.state_dict())
+    started = time.perf_counter()
+    for step in range(1, steps + 1):
+        x1 = data[torch.randint(0, len(data), (batch,), device=device)]
+        x0 = torch.randn_like(x1)
+        t, s = imeanflow_times(batch, device, long_share, logit_mean, logit_std)
+        z = (1 - t)[:, None] * x0 + t[:, None] * x1
+        with torch.no_grad():
+            v_theta = model(z, t, t)
+        V, u, dudt = imeanflow_prediction(lambda z_, t_, s_: model(z_, t_, s_), z, t, s, v_theta)
+        loss = ((V - (x1 - x0)) ** 2).sum(1).mean()
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+        opt.step()
+        sched.step()
+        _ema_update(ema, model, ema_decay)
+        if step % log_every == 0 or step == 1:
+            elapsed = time.perf_counter() - started
+            with torch.no_grad():
+                long = s != t
+                resid = ((V - v_theta) ** 2).sum(1)[long].mean() if long.any() else torch.zeros(())
+            if log is not None:
+                log.append(dict(step=step, loss=loss.item(), raw_mse=resid.item(),
+                                seconds=elapsed))
+            if verbose:
+                print("  step %5d  iMF loss %.4f  identity residual %.4f  (%.0fs)"
+                      % (step, loss.item(), resid.item(), elapsed))
     return ema
 
 

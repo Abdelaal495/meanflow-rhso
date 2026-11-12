@@ -21,6 +21,14 @@ trainers with one recipe (Adam 3e-4, warm-up + cosine, grad clip 1, EMA 0.999):
 curriculum) and `train_flow_matching`. At `dim = 2` they reproduce the two-moons models and
 trainers bit for bit (checked by `tests/test_gmm_study.py`), so cached two-moons models load.
 
+A third trainer, `train_imeanflow`, uses the same recipe with iMF's v-loss (Geng et al. 2026,
+arXiv 2512.02012, Algorithm 1) in this repo's convention (t = 0 noise, s >= t):
+V = u(z, t, s) - (s - t) sg(du/dt), with du/dt a JVP along the model's own velocity
+sg(u(z, t, t)), and the loss |V - (x1 - x0)|^2. Its times are logit-normal(0.4, 1), which is
+iMF's logit-normal(-0.4, 1) with the time direction reversed, and s != t on half the batch.
+There is no curriculum and no adaptive weight. The sign is checked against the exact flow of
+the Gaussian mixture by `tests/test_gmm_study.py`.
+
 ## Gaussian-mixture study: `toy/gmm_study.py` (rebuttal Task 4)
 
 A 16-D mixture of 8 anisotropic Gaussians (scales 0.5 down to 0.02, so some directions carry
@@ -95,9 +103,14 @@ and writes the same lines to `outputs/hexagon_study/train_<model>.log`.
 
 A flow-matching and a MeanFlow prior share the 2-D MLP of `toy/common.py` (width 256,
 depth 4) and one recipe (30k steps, batch 1024, Adam 3e-4, warm-up + cosine, EMA 0.999).
-MeanFlow is trained with the MeanFlow objective at adaptive-weight exponents p = 0 and 0.5.
-Stage 1 writes `outputs/hexagon_study/stage1/` (`sanity.csv`, `sanity.json`, `samples.png`,
+MeanFlow is trained with the MeanFlow objective at adaptive-weight exponents p = 0 and 0.5,
+and with iMF's objective (`train_imeanflow`, model `imeanflow`).
+Stage 1 writes `outputs/hexagon_study/stage1/` (`sanity.csv`, `criteria.csv`, `sanity.json`,
+`samples.png`,
 `training_curves.png`). The table reports sliced W2 to the data against the two-sample floor,
 and the distribution of distances to the hexagon for flow-matching Heun-100 and MeanFlow
 with 1, 2 and 8 steps. It also covers the jumps T(x_t; t -> 1) from the true marginal at
-t = 0.25, 0.5, 0.75, next to flow-matching Heun from the same x_t.
+t = 0.25, 0.5, 0.75, next to flow-matching Heun from the same x_t. Pass criteria for each
+one-jump prior (the Gaussian-mixture study's, minus its low-signal variance ratio, which has
+no 2-D counterpart): one-step sliced W2 at most 0.05, and 8-step sliced W2 within 1.5x of
+flow-matching Heun-100.
