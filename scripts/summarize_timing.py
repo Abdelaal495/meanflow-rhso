@@ -50,11 +50,15 @@ TASK_ORDER = list(TASK_NAME)
 ROWS = [
     (("sdedit", "base"), "SDEdit"),
     (("mpc_rhc", "base"), "MPC-RHC"),
+    (("mpc_rhc", "matched_time"), "MPC-RHC (matched time)"),
     (("mpc_delta_t", "base"), "MPC-$\\Delta t$"),
     (("mpc_delta_t", "matched"), "MPC-$\\Delta t$ (matched BP)"),
     (("pnp", "base"), "PnP-Flow"),
+    (("pnp", "matched_time"), "PnP-Flow (matched time)"),
     (("dflow", "base"), "D-Flow"),
+    (("dflow", "matched_time"), "D-Flow (matched time)"),
     (("flower", "base"), "Flower"),
+    (("flower", "matched_time"), "Flower (matched time)"),
     (("rhso", "base"), "RHSO"),
     (("rhso", "matched"), "RHSO (matched BP)"),
 ]
@@ -91,6 +95,8 @@ def fnum(value):
 
 
 def variant_of(experiment):
+    if "__matched_time" in str(experiment):       # Task 5 matched-time entries
+        return "matched_time"
     return "matched" if "_matched" in str(experiment) else "base"
 
 

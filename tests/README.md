@@ -21,6 +21,7 @@ python tests/test_gmm_study.py             # needs torch + git (no trained model
 python tests/test_gmm_solvers.py           # needs torch (no trained model)
 python tests/test_hexagon_study.py         # needs torch (no trained model)
 python tests/test_timing_configs.py         # needs jax + pyyaml (imports run.py)
+python tests/test_matched_time.py           # needs jax + pyyaml (imports run.py)
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -189,6 +190,18 @@ the run directory (and only those), and estimates the wall-clock from logged run
 memory bracket (sampled `bytes_in_use` lower bound, lifetime peak upper bound) is computed and
 sampled in the NVML loop; and `summarize_timing.py` builds the three Table 29-style tables
 from synthetic runs, with the bracket and the uninformative flag in the memory table.
+
+`test_matched_time.py` covers the matched-time comparison on the pixel priors (rebuttal
+Task 5): the quality and timing configurations regenerate byte for byte; the quality config is
+exactly the 33 entries of the task's table (written out independently in the test) at the
+benchmark batch sizes, each equal to its frozen source job except for its budget knob and the
+cost fields the planner derives from it; D-Flow's backprops equal `num_opt_steps` and
+MPC-RHC's `num_mpc_steps x n_ctrl x (K-1)`; every entry's comment names its source and says it
+is matched to RHSO's measured time; the timing config has one one-job block per entry at batch
+size 1; the driver runs one model-only baseline process per prior on that two-prior config;
+and `matched_time_table.py` picks RHSO's and MPC-Δt's entries per prior, reproduces
+`paired_stats.py`'s bootstrap, applies the 10% time rule at its boundary, and refuses
+duplicate cells, mismatched timing jobs and unpaired image sets.
 
 `test_matched_configs.py`, `test_hpo_lock.py` and `test_paired_stats.py` cover the
 matched-budget comparison of RHSO and MPC-Δt (rebuttal Task 2). The first resolves the

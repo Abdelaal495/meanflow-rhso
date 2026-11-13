@@ -134,13 +134,24 @@ def select_blocks(args, by_block):
     return blocks
 
 
-def build_commands(args, blocks, skip_baseline=False):
-    """[(label, argv)] in execution order, for the blocks still to run."""
+def build_commands(args, blocks, skip_baseline=False, baseline_models=None):
+    """[(label, argv)] in execution order, for the blocks still to run.
+
+    `baseline_models` (a config with more than one prior, e.g. the matched-time timing
+    config): one model-only baseline PROCESS per listed prior, each with `--models <prior>`,
+    so no prior's baseline carries the pool another framework left behind.  Without it there
+    is one baseline process, as for the one-prior configs.
+    """
     common = _run_argv(args)
     run_ = [args.python, "-u", str(REPO_ROOT / "run.py")]
     checks = [] if args.with_checks else ["--no-check"]
     commands = []
-    if not skip_baseline:
+    if baseline_models:
+        for model in baseline_models:
+            commands.append(("model_only_baseline_%s" % model,
+                             run_ + common + checks + ["--no-figures", "--memory-baseline-only",
+                                                       "--models", model]))
+    elif not skip_baseline:
         commands.append(("model_only_baseline",
                          run_ + common + checks + ["--no-figures", "--memory-baseline-only"]))
     for block in blocks:
@@ -340,7 +351,12 @@ def main(argv=None):
         done = [b for b in blocks if is_complete(run_dir, by_block[b], timing_on)]
         skip_baseline = baseline_complete(run_dir, models)
     remaining = [b for b in blocks if b not in done]
-    commands = build_commands(args, remaining, skip_baseline=skip_baseline)
+    baseline_models = None
+    if len(models) > 1:                     # one baseline process per prior still missing one
+        baseline_models = [m for m in models if args.rerun_all
+                           or not baseline_complete(run_dir, [m])]
+    commands = build_commands(args, remaining, skip_baseline=skip_baseline,
+                              baseline_models=baseline_models)
 
     print("run dir : %s" % run_dir)
     print("child environment: %s" % " ".join("%s=%s" % kv for kv in TIMING_ENV.items()))

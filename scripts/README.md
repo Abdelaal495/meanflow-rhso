@@ -8,6 +8,7 @@
 | `paired_stats.py` | paired RHSO − MPC-Δt differences per prior and task, with bootstrap 95% intervals, as CSV and LaTeX rows |
 | `make_flower_configs.py` | Flower on pMF / JiT: `screen` writes the screen (`num_flower_steps` 50/100/200/500, plus `flower_cg_max_iters` 50/100 on deblurring; 4 images), `freeze` writes the 100-image evaluation from the tuning runs; each with a 2-image smoke variant |
 | `make_timing_config.py`, `run_timing.py`, `summarize_timing.py` | rebuttal Task 1: one timing configuration per prior (every task and method of the three frozen configs, 3 images, batch size 1, plus a 2-image smoke variant); a driver that runs each configuration in a fresh process with one shared run id after a model-only memory baseline; and the per-prior summary (seconds per image, allocator peak memory, seconds per forward-equivalent) with LaTeX tables |
+| `make_matched_time_config.py`, `matched_time_table.py` | rebuttal Task 5: the matched-time configurations on pMF and JiT (each method's budget knob set so it takes RHSO's measured time; 100-image quality config, timing config at batch size 1, smoke variants), and the table of seconds per image, quality and paired differences against RHSO |
 | `check_fingerprints.py` | fails loudly unless every job of a Flower or matched-budget run has the benchmark run's measurement and initial-state fingerprints |
 | `extract_imagenet100_from_tar.py` | the same pool from a local ImageNet tar instead of the mirror |
 | `export_recon_bundle_only.py`, `add_corrupted_images_to_bundle.py` | package a run's reconstructions for sharing |
@@ -152,3 +153,31 @@ model-only baseline's load peak. The NVML figure is the process's reserved pool 
 context. `runtime.timing_detail: true` (src/timing.py) adds a device-synchronised per-image
 timer and allocator, pool, hardware and version records to each job's `metadata.json`;
 results.csv is unchanged.
+
+## Matched-time comparison on the pixel priors (rebuttal Task 5)
+
+Every method gets RHSO's measured wall-clock per image on the same prior and task. The knob
+values (PnP-Flow `num_pnp_steps`, Flower `num_flower_steps`, D-Flow `num_opt_steps`,
+MPC-RHC `n_ctrl`) are fixed in `make_matched_time_config.py`; each entry is its prior's
+frozen entry with only that knob changed, at the benchmark batch size. MPC-RHC ran at a
+smaller batch than the other three, so it sits in `<task>__matched_time_rhc`.
+
+```bash
+python scripts/make_matched_time_config.py     # quality + timing configs and smoke variants
+python run.py --config configs/experiments_matched_time_pixel_smoke.yaml --run-id matched_time_smoke
+python run.py --config configs/experiments_matched_time_pixel.yaml --run-id <id> --no-figures
+python scripts/run_timing.py --config configs/experiments_rebuttal_timing_matched_time.yaml \
+    --run-id timing_matched_time               # or: bash submit_timing.sh matched_time ...
+python scripts/matched_time_table.py \
+    --quality outputs/<matched-time run> --quality outputs/run_9187465 --quality outputs/run_9191132 \
+    --quality outputs/run_9187499 --quality outputs/run_9187476 \
+    --timing outputs/timing_pmf --timing outputs/timing_jit --timing outputs/timing_matched_time
+```
+
+The timing config holds both priors, so `run_timing.py` runs one model-only baseline process
+per prior (`--models`). In the table, RHSO is the frozen RHSO on pMF and the matched-BP
+(direct planner) RHSO on JiT; MPC-Δt is Direction B on pMF and the frozen MPC-Δt on JiT.
+Every other method shows its frozen and matched-time entries, and the one with the lower
+LPIPS among those within 10% of RHSO's time (`--tolerance`) is marked. Differences are
+RHSO − method with `paired_stats.py`'s bootstrap. A cell provided by two runs, a timing job
+whose configuration differs from its quality job, or unpaired image sets stop the script.
