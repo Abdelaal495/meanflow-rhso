@@ -49,6 +49,61 @@ def _jax_cost_analysis_as_list():
         compiled.cost_analysis = original
 
 
+def _device_put_replicated(x, devices):
+    """Drop-in for the removed `jax.device_put_replicated`, with the old semantics.
+
+    Every leaf becomes an array of shape (len(devices),) + leaf.shape whose i-th slice is a
+    copy of the leaf living on devices[i] (one shard per device), so pmap-style code that
+    consumes `flax.jax_utils.replicate` output sees the same shapes and placement as before.
+    """
+    import jax
+    devices = list(devices)
+    if not devices:
+        raise ValueError("`devices` argument to `device_put_replicated` must be a "
+                         "non-empty sequence.")
+    mesh = jax.sharding.Mesh(np.array(devices, dtype=object), ("replica",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("replica"))
+
+    def put(leaf):
+        shards = [jax.numpy.expand_dims(jax.device_put(leaf, d), 0) for d in devices]
+        shape = (len(devices),) + tuple(shards[0].shape[1:])
+        return jax.make_array_from_single_device_arrays(shape, sharding, shards)
+
+    return jax.tree_util.tree_map(put, x)
+
+
+def _device_put_replicated_works(jax) -> bool:
+    """True when `jax.device_put_replicated` exists AND can be called.
+
+    Newer JAX keeps the name only as a deprecation entry: `hasattr` is False because
+    attribute access raises AttributeError. A stub that is reachable but raises
+    AttributeError when called counts as missing too, so the function is probed once on a
+    tiny array. Any other exception from the probe propagates.
+    """
+    if not hasattr(jax, "device_put_replicated"):
+        return False
+    try:
+        fn = jax.device_put_replicated
+        fn(np.zeros((1,), np.float32), jax.local_devices()[:1])
+    except AttributeError:
+        return False
+    return True
+
+
+def _ensure_device_put_replicated(jax) -> bool:
+    """Install `_device_put_replicated` as `jax.device_put_replicated` only when JAX has no
+    working one (iMF's `LatentManager` calls `flax.jax_utils.replicate`, which needs it).
+
+    Installed for the rest of the process, since the repository's decoder may replicate
+    again after construction. Returns True when the shim was installed; when the original
+    works, nothing is changed.
+    """
+    if _device_put_replicated_works(jax):
+        return False
+    jax.device_put_replicated = _device_put_replicated
+    return True
+
+
 class IMFAdapter(MeanFlowAdapter):
 
     def __init__(self, registry: Dict[str, Any], repo_dir: Path, ckpt_cache: Path,
@@ -116,6 +171,7 @@ class IMFAdapter(MeanFlowAdapter):
             from utils.vae_util import LatentManager
             from diffusers.models import FlaxAutoencoderKL
             self._FlaxAutoencoderKL = FlaxAutoencoderKL
+            _ensure_device_put_replicated(jax)
             with _jax_cost_analysis_as_list():
                 self._latent_manager = LatentManager(
                     vae_type=self.vae_type,
