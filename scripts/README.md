@@ -10,6 +10,7 @@
 | `make_timing_config.py`, `run_timing.py`, `summarize_timing.py` | rebuttal Task 1: one timing configuration per prior (every task and method of the three frozen configs, 3 images, batch size 1, plus a 2-image smoke variant); a driver that runs each configuration in a fresh process with one shared run id after a model-only memory baseline; and the per-prior summary (seconds per image, allocator peak memory, seconds per forward-equivalent) with LaTeX tables |
 | `make_matched_time_config.py`, `matched_time_table.py` | rebuttal Task 5: the matched-time configurations on pMF and JiT (each method's budget knob set so it takes RHSO's measured time; 100-image quality config, timing config at batch size 1, smoke variants), and the table of seconds per image, quality and paired differences against RHSO |
 | `make_budget_level_config.py`, `budget_level_table.py` | rebuttal Task 6: the cheap and mid budget levels on pMF and JiT (RHSO, MPC-Δt, D-Flow and MPC-RHC with their step knob set to the cheap methods' time and 4× that; 100-image quality config, timing config at batch size 1, smoke variants), and the per-level table: each method's lowest-LPIPS run within 1.1× the budget, paired differences against the level's best, wins and ties |
+| `make_budget_level_lrscaled_config.py` | rebuttal Task 7: Task 6's 66 budget-level entries with only the learning rate changed, `lr × (tuned knob / new knob)`, 100-image config and smoke variant; `budget_level_table.py --timing-ignore lr` pairs them with Task 6's timing run |
 | `check_fingerprints.py` | fails loudly unless every job of a Flower or matched-budget run has the benchmark run's measurement and initial-state fingerprints |
 | `extract_imagenet100_from_tar.py` | the same pool from a local ImageNet tar instead of the mirror |
 | `export_recon_bundle_only.py`, `add_corrupted_images_to_bundle.py` | package a run's reconstructions for sharing |
@@ -217,3 +218,25 @@ Differences are method − (the level's best in-budget method) with `paired_stat
 bootstrap; an in-budget method whose ΔLPIPS interval contains 0 ties with the best, and the
 best wins significantly when nobody ties. Outputs: `budget_levels.csv`,
 `budget_levels_summary.csv`, `budget_levels_wins.csv` and `budget_levels.tex`.
+
+## Budget levels with scaled learning rates (rebuttal Task 7)
+
+Task 6 cut the steps but kept the tuned learning rates. Task 7 reruns the same 66 entries with
+
+    lr_new = lr_tuned × (tuned knob / new knob)
+
+(knob: RHSO `num_opt_steps` M, MPC-Δt `n_ctrl`, D-Flow `num_opt_steps`, MPC-RHC `n_ctrl`;
+tuned values from the entry's source entry). Everything else, every step count and batch size
+included, is Task 6's; `make_budget_level_lrscaled_config.py` builds its entries from Task 6's
+generator. Blocks are Task 6's names plus `_lr`. There is no timing run: lr does not change the
+time per image, so the table reuses `timing_budget_levels`.
+
+```bash
+python scripts/make_budget_level_lrscaled_config.py      # quality config + smoke variant
+bash submit.sh --array 4 --config configs/experiments_budget_levels_lrscaled_pixel.yaml --gpu h100:1 --time <HH:MM:SS>
+python scripts/budget_level_table.py --timing-ignore lr --quality outputs/<lr-scaled run> ...   # as Task 6
+```
+
+`--timing-ignore lr` leaves lr out of the quality-to-timing pairing (when several timing jobs
+then agree it prefers the same variant, then the Task 6 variant). The `_lr` runs are labelled
+"cheap level, lr scaled" and "mid level, lr scaled". Without the option nothing changes.

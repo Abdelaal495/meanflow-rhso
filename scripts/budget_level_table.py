@@ -9,6 +9,8 @@
         --timing outputs/timing_matched_time --timing outputs/timing_budget_levels \
         --out-dir outputs/budget_level_table
 
+    (Task 7: pass the lr-scaled run as a --quality run and add --timing-ignore lr.)
+
 Quality and timing runs are read with scripts/matched_time_table.py's readers (per-image CSV;
 per-job metadata.json from scripts/run_timing.py, device-synchronised seconds per image at
 batch size one).  Any number of each may be given.
@@ -34,6 +36,13 @@ computation-defining fields agree with it (budget knobs required on both sides; 
 variant breaks a tie); a quality job with no such timing job cannot be placed and is listed
 on stderr.
 
+LR-SCALED RUNS (Task 7, scripts/make_budget_level_lrscaled_config.py).  Blocks named
+<task>__budget_<level>[_rhc|_rhso]_lr are the variants "cheap level, lr scaled" and "mid
+level, lr scaled".  They differ from Task 6's entries in lr only, which does not change the
+time per image, so they have no timing run of their own: with --timing-ignore lr the pairing
+skips lr (and, if several timing jobs then agree, prefers the one of the same variant, then
+the Task 6 variant without "_lr").  Without the option nothing changes.
+
 DIFFERENCES.  The level's best method is the lowest-LPIPS entry WITHIN budget (an
 over-budget entry is never the best).  Every other entry gets
 
@@ -53,6 +62,7 @@ import argparse
 import collections
 import csv
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -82,7 +92,11 @@ METHOD_NAME = mtt.METHOD_NAME
 METHOD_PLAIN = {"rhso": "RHSO", "mpc_delta_t": "MPC-dt", "dflow": "D-Flow",
                 "mpc_rhc": "MPC-RHC", "pnp": "PnP-Flow", "flower": "Flower"}
 VARIANT_NAME = {"frozen": "tuned", "matched": "matched BP", "matched_time": "matched time",
-                "budget_cheap": "cheap level", "budget_mid": "mid level"}
+                "budget_cheap": "cheap level", "budget_mid": "mid level",
+                "budget_cheap_lr": "cheap level, lr scaled", "budget_mid_lr": "mid level, lr scaled"}
+# Fields --timing-ignore may drop from the quality/timing pairing: ones that do not change the
+# computation, so not the time per image.  Task 7's runs differ from Task 6's in lr only.
+TIMING_IGNORABLE = ("lr",)
 
 # Seconds per image (the user's table above).  None = no budget at that level.
 BUDGETS = {
@@ -99,8 +113,14 @@ BUDGETS = {
 REFERENCE_VARIANT = {p: mtt.ROLES["rhso"][p][0] for p in PRIORS}     # pmf frozen, jit matched
 
 
+_LR_SCALED = re.compile(r"__budget_(cheap|mid)(?:_rhc|_rhso)?_lr(?:__|$)")
+
+
 def variant_of(experiment):
     name = str(experiment or "")
+    lr_scaled = _LR_SCALED.search(name)          # Task 7: <task>__budget_<level>[_rhc|_rhso]_lr
+    if lr_scaled:
+        return "budget_%s_lr" % lr_scaled.group(1)
     for level in ("cheap", "mid"):
         if "__budget_%s" % level in name:
             return "budget_%s" % level
@@ -148,22 +168,32 @@ def timing_rows(timing_cells):
             for rows in timing_cells.values() for r in rows]
 
 
-def agrees(job, row, method):
+def agrees(job, row, method, ignore=()):
     for k in mtt.BUDGET[method]:
         if mtt.norm(job["fields"].get(k)) is None or mtt.norm(row["fields"].get(k)) is None:
             return False
     for k in mtt.PARAM_FIELDS:
+        if k in ignore:
+            continue
         a, b = mtt.norm(job["fields"].get(k)), mtt.norm(row["fields"].get(k))
         if a is not None and b is not None and a != b:
             return False
     return True
 
 
-def match_timing(job, rows, prior, task, method):
+def _base_variant(variant):
+    """budget_cheap_lr -> budget_cheap: the Task 6 variant whose timing a Task 7 job reuses."""
+    return variant[:-3] if variant.endswith("_lr") else variant
+
+
+def match_timing(job, rows, prior, task, method, ignore=()):
     found = [r for r in rows if r["prior"] == prior and r["task"] == task
-             and r["method"] == method and agrees(job, r, method)]
+             and r["method"] == method and agrees(job, r, method, ignore)]
     if len(found) > 1:
         same = [r for r in found if r["variant"] == job["variant"]]
+        found = same if same else found
+    if len(found) > 1:
+        same = [r for r in found if r["variant"] == _base_variant(job["variant"])]
         found = same if same else found
     if len(found) > 1:
         raise SystemExit("quality job %s (%s) matches %d timing jobs: %s"
@@ -183,7 +213,7 @@ def paired(job, best, seed, resamples):
     return mtt.paired(job, best, seed, resamples)
 
 
-def candidates(jobs, timing, prior, task, notes):
+def candidates(jobs, timing, prior, task, notes, ignore=()):
     """{method: [(job, timing row, seconds, mean metrics)]} for the timed candidate jobs."""
     out = {}
     for method in METHOD_ORDER:
@@ -191,7 +221,7 @@ def candidates(jobs, timing, prior, task, notes):
         for job in jobs.get((prior, task, method), []):
             if not is_candidate(prior, method, job):
                 continue
-            t = match_timing(job, timing, prior, task, method)
+            t = match_timing(job, timing, prior, task, method, ignore)
             if t is None or t.get("seconds_per_image_mean") is None:
                 notes.append("%s/%s %s: quality job %s (%s) has no timing job; not a candidate"
                              % (prior, task, plain(label(method, job["variant"])), job["job_id"],
@@ -214,16 +244,32 @@ def budget_for(prior, task, level, cands, notes):
     return None
 
 
-def build(quality, timing, tolerance=TOLERANCE, seed=SEED, resamples=RESAMPLES):
-    """(rows, notes).  One row per (prior, task, level, method) that has a timed candidate."""
+def build(quality, timing, tolerance=TOLERANCE, seed=SEED, resamples=RESAMPLES,
+          timing_ignore=()):
+    """(rows, notes).  One row per (prior, task, level, method) that has a timed candidate.
+
+    timing_ignore: fields (from TIMING_IGNORABLE) left out of the quality/timing pairing."""
+    bad = [k for k in timing_ignore if k not in TIMING_IGNORABLE]
+    if bad:
+        raise SystemExit("--timing-ignore accepts only %s, not %s"
+                         % (", ".join(TIMING_IGNORABLE), ", ".join(bad)))
+    ignore = tuple(timing_ignore)
     jobs, trows = quality_jobs(quality), timing_rows(timing)
     rows, notes = [], []
     for prior in PRIORS:
         per_task = {}
         for task in TASK_ORDER:
-            cands = candidates(jobs, trows, prior, task, notes)
+            cands = candidates(jobs, trows, prior, task, notes, ignore)
             if cands:
                 per_task[task] = cands
+        if ignore:
+            reused = sum(1 for cands in per_task.values() for pool in cands.values()
+                         for job, t, _, _ in pool
+                         if any(mtt.norm(job["fields"].get(k)) != mtt.norm(t["fields"].get(k))
+                                for k in ignore))
+            if reused:
+                notes.append("%s: %d quality job(s) paired with a timing job that differs in %s "
+                             "(--timing-ignore)" % (prior, reused, ", ".join(ignore)))
         for level in LEVELS:
             for task, cands in per_task.items():
                 budget = budget_for(prior, task, level, cands, notes)
@@ -516,9 +562,14 @@ def main(argv=None):
                    help="largest allowed excess over the budget, as a fraction (default 0.10)")
     p.add_argument("--resamples", type=int, default=RESAMPLES)
     p.add_argument("--seed", type=int, default=SEED)
+    p.add_argument("--timing-ignore", action="append", default=[], choices=TIMING_IGNORABLE,
+                   metavar="FIELD",
+                   help="pair quality and timing jobs ignoring this field (only 'lr': it does "
+                        "not change the time per image; Task 7's lr-scaled runs reuse "
+                        "timing_budget_levels this way)")
     a = p.parse_args(argv)
     rows, notes = build(mtt.read_quality(a.quality), mtt.read_timing(a.timing), a.tolerance,
-                        a.seed, a.resamples)
+                        a.seed, a.resamples, timing_ignore=a.timing_ignore)
     if not rows:
         raise SystemExit("no (prior, task) has a timed quality job in the runs given")
     print_rows(rows)

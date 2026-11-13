@@ -23,6 +23,7 @@ python tests/test_hexagon_study.py         # needs torch (no trained model)
 python tests/test_timing_configs.py         # needs jax + pyyaml (imports run.py)
 python tests/test_matched_time.py           # needs jax + pyyaml (imports run.py)
 python tests/test_budget_levels.py          # needs jax + pyyaml (imports run.py), bash
+python tests/test_budget_levels_lrscaled.py # needs jax + pyyaml (imports run.py)
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -219,6 +220,16 @@ cheapest run marked over budget, never lets an over-budget run be the best, drop
 jobs and non-direct JiT RHSO, takes the RHSO-time budget from the reference's timing,
 reproduces `paired_stats.py`'s bootstrap for method − best, counts wins and ties, writes its
 CSVs and LaTeX, and refuses duplicate jobs, ambiguous timing and unpaired image sets.
+
+`test_budget_levels_lrscaled.py` covers the lr-scaled rerun of the budget levels (rebuttal
+Task 7): the two configurations regenerate byte for byte and their learning rates equal the
+task's table (written out in the test) to 4 significant figures; every lr follows
+`lr_tuned × tuned knob / new knob`, recomputed from the source configs; every job equals its
+Task 6 job in every field but lr (same batch sizes, steps and backprops); comments name the
+source, the level and the lr scaling. On synthetic runs `budget_level_table.py` labels the
+`_lr` variants, leaves them unpaired by default, pairs them with Task 6's timing jobs under
+`--timing-ignore lr` (preferring Task 6's over another variant's with the same knob), and
+rejects any other field.
 
 `test_matched_configs.py`, `test_hpo_lock.py` and `test_paired_stats.py` cover the
 matched-budget comparison of RHSO and MPC-Δt (rebuttal Task 2). The first resolves the
