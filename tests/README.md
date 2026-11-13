@@ -22,6 +22,7 @@ python tests/test_gmm_solvers.py           # needs torch (no trained model)
 python tests/test_hexagon_study.py         # needs torch (no trained model)
 python tests/test_timing_configs.py         # needs jax + pyyaml (imports run.py)
 python tests/test_matched_time.py           # needs jax + pyyaml (imports run.py)
+python tests/test_budget_levels.py          # needs jax + pyyaml (imports run.py), bash
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -202,6 +203,22 @@ size 1; the driver runs one model-only baseline process per prior on that two-pr
 and `matched_time_table.py` picks RHSO's and MPC-Δt's entries per prior, reproduces
 `paired_stats.py`'s bootstrap, applies the 10% time rule at its boundary, and refuses
 duplicate cells, mismatched timing jobs and unpaired image sets.
+
+`test_budget_levels.py` covers the cheap and mid budget levels on the pixel priors (rebuttal
+Task 6): the four configurations regenerate byte for byte from the task's table (written out
+independently in the test); the quality config is exactly the 66 entries (36 cheap, 30 mid)
+at the source entries' batch sizes, MPC-RHC and JiT's RHSO in their own `_rhc` / `_rhso`
+blocks, each job equal to its source except for its step knob(s) and the derived cost fields,
+JiT's RHSO keeping the direct planner and Heun; backprops follow RHSO `N·M`, MPC-Δt
+`(N − 1)·n_ctrl`, D-Flow `num_opt_steps`, MPC-RHC `num_mpc_steps·n_ctrl·(K − 1)`; comments
+name the source and the level; the timing config has one one-job block per entry at batch
+size 1, `run_timing.py --dry-run` gives a baseline per prior and 66 blocks, and an LF copy of
+`submit_timing.sh` accepts `budget_levels`. On synthetic runs, `budget_level_table.py` uses
+the task's budgets, picks the lowest-LPIPS run within 1.1× (boundary included) or else the
+cheapest run marked over budget, never lets an over-budget run be the best, drops untimed
+jobs and non-direct JiT RHSO, takes the RHSO-time budget from the reference's timing,
+reproduces `paired_stats.py`'s bootstrap for method − best, counts wins and ties, writes its
+CSVs and LaTeX, and refuses duplicate jobs, ambiguous timing and unpaired image sets.
 
 `test_matched_configs.py`, `test_hpo_lock.py` and `test_paired_stats.py` cover the
 matched-budget comparison of RHSO and MPC-Δt (rebuttal Task 2). The first resolves the

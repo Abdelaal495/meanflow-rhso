@@ -9,6 +9,7 @@
 | `make_flower_configs.py` | Flower on pMF / JiT: `screen` writes the screen (`num_flower_steps` 50/100/200/500, plus `flower_cg_max_iters` 50/100 on deblurring; 4 images), `freeze` writes the 100-image evaluation from the tuning runs; each with a 2-image smoke variant |
 | `make_timing_config.py`, `run_timing.py`, `summarize_timing.py` | rebuttal Task 1: one timing configuration per prior (every task and method of the three frozen configs, 3 images, batch size 1, plus a 2-image smoke variant); a driver that runs each configuration in a fresh process with one shared run id after a model-only memory baseline; and the per-prior summary (seconds per image, allocator peak memory, seconds per forward-equivalent) with LaTeX tables |
 | `make_matched_time_config.py`, `matched_time_table.py` | rebuttal Task 5: the matched-time configurations on pMF and JiT (each method's budget knob set so it takes RHSO's measured time; 100-image quality config, timing config at batch size 1, smoke variants), and the table of seconds per image, quality and paired differences against RHSO |
+| `make_budget_level_config.py`, `budget_level_table.py` | rebuttal Task 6: the cheap and mid budget levels on pMF and JiT (RHSO, MPC-Δt, D-Flow and MPC-RHC with their step knob set to the cheap methods' time and 4× that; 100-image quality config, timing config at batch size 1, smoke variants), and the per-level table: each method's lowest-LPIPS run within 1.1× the budget, paired differences against the level's best, wins and ties |
 | `check_fingerprints.py` | fails loudly unless every job of a Flower or matched-budget run has the benchmark run's measurement and initial-state fingerprints |
 | `extract_imagenet100_from_tar.py` | the same pool from a local ImageNet tar instead of the mirror |
 | `export_recon_bundle_only.py`, `add_corrupted_images_to_bundle.py` | package a run's reconstructions for sharing |
@@ -181,3 +182,38 @@ Every other method shows its frozen and matched-time entries, and the one with t
 LPIPS among those within 10% of RHSO's time (`--tolerance`) is marked. Differences are
 RHSO − method with `paired_stats.py`'s bootstrap. A cell provided by two runs, a timing job
 whose configuration differs from its quality job, or unpaired image sets stop the script.
+
+## Cheap and mid budget levels on the pixel priors (rebuttal Task 6)
+
+The reverse of Task 5: the backprop methods get the measured time of the cheap methods
+(cheap level) and 4× that (mid level, no deblurring). The step values (RHSO `num_rhso_steps`,
+`num_opt_steps`; MPC-Δt `n_ctrl` with N fixed; D-Flow `num_opt_steps`; MPC-RHC `n_ctrl`) are
+fixed in `make_budget_level_config.py`. Each entry is its prior's own entry (pMF RHSO:
+`<task>__rhso` of the final benchmark; JiT RHSO: `<task>__rhso_matched`, direct planner and
+Heun; MPC-Δt and D-Flow: `<task>__core`; MPC-RHC: `<task>__rhc`) with only that knob
+changed, at the source's batch size: `<task>__budget_<level>`, plus `_rhc` for MPC-RHC and
+`_rhso` for JiT's RHSO, whose batch sizes differ. 66 entries.
+
+```bash
+python scripts/make_budget_level_config.py     # quality + timing configs and smoke variants
+python run.py --config configs/experiments_budget_levels_pixel_smoke.yaml --run-id budget_levels_smoke
+bash submit.sh --array 4 --config configs/experiments_budget_levels_pixel.yaml --gpu h100:1 --time <HH:MM:SS>
+bash submit_timing.sh budget_levels --gpu h100:1 --time <HH:MM:SS>   # run id timing_budget_levels
+python scripts/budget_level_table.py \
+    --quality outputs/<budget-level run> --quality outputs/run_26548623 --quality outputs/run_26548625 \
+    --quality outputs/run_9187465 --quality outputs/run_9191132 --quality outputs/run_9187499 \
+    --quality outputs/run_9187476 \
+    --timing outputs/timing_pmf --timing outputs/timing_jit --timing outputs/timing_matched_time \
+    --timing outputs/timing_budget_levels
+```
+
+The budgets (seconds per image, per prior, level and task) are hard-coded in
+`budget_level_table.py`; a third level is RHSO's own Task 5 time (pMF frozen RHSO, JiT
+matched-BP direct-planner RHSO), read from the timing runs. Per (prior, task, level), every
+method gets its lowest-LPIPS run among ALL its runs within 1.1× the budget (`--tolerance`),
+else its cheapest run marked "over budget (×ratio)"; on JiT only direct-planner RHSO runs
+count. A quality job is paired with the timing job whose computation fields agree with it.
+Differences are method − (the level's best in-budget method) with `paired_stats.py`'s
+bootstrap; an in-budget method whose ΔLPIPS interval contains 0 ties with the best, and the
+best wins significantly when nobody ties. Outputs: `budget_levels.csv`,
+`budget_levels_summary.csv`, `budget_levels_wins.csv` and `budget_levels.tex`.

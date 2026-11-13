@@ -51,16 +51,24 @@ ROWS = [
     (("sdedit", "base"), "SDEdit"),
     (("mpc_rhc", "base"), "MPC-RHC"),
     (("mpc_rhc", "matched_time"), "MPC-RHC (matched time)"),
+    (("mpc_rhc", "budget_cheap"), "MPC-RHC (cheap level)"),
+    (("mpc_rhc", "budget_mid"), "MPC-RHC (mid level)"),
     (("mpc_delta_t", "base"), "MPC-$\\Delta t$"),
     (("mpc_delta_t", "matched"), "MPC-$\\Delta t$ (matched BP)"),
+    (("mpc_delta_t", "budget_cheap"), "MPC-$\\Delta t$ (cheap level)"),
+    (("mpc_delta_t", "budget_mid"), "MPC-$\\Delta t$ (mid level)"),
     (("pnp", "base"), "PnP-Flow"),
     (("pnp", "matched_time"), "PnP-Flow (matched time)"),
     (("dflow", "base"), "D-Flow"),
     (("dflow", "matched_time"), "D-Flow (matched time)"),
+    (("dflow", "budget_cheap"), "D-Flow (cheap level)"),
+    (("dflow", "budget_mid"), "D-Flow (mid level)"),
     (("flower", "base"), "Flower"),
     (("flower", "matched_time"), "Flower (matched time)"),
     (("rhso", "base"), "RHSO"),
     (("rhso", "matched"), "RHSO (matched BP)"),
+    (("rhso", "budget_cheap"), "RHSO (cheap level)"),
+    (("rhso", "budget_mid"), "RHSO (mid level)"),
 ]
 ROW_LABEL = dict(ROWS)
 ROW_ORDER = {key: i for i, (key, _) in enumerate(ROWS)}
@@ -97,6 +105,9 @@ def fnum(value):
 def variant_of(experiment):
     if "__matched_time" in str(experiment):       # Task 5 matched-time entries
         return "matched_time"
+    for level in ("cheap", "mid"):                # Task 6 budget-level entries
+        if "__budget_%s" % level in str(experiment):
+            return "budget_%s" % level
     return "matched" if "_matched" in str(experiment) else "base"
 
 

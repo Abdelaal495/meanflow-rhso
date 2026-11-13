@@ -8,6 +8,9 @@
 #     bash submit_timing.sh matched_time --gpu h100:1 --time 03:00:00
 #         # Task 5: configs/experiments_rebuttal_timing_matched_time.yaml (pMF and JiT in one
 #         # job, one model-only baseline process per prior), run id timing_matched_time
+#     bash submit_timing.sh budget_levels --gpu h100:1 --time 03:00:00
+#         # Task 6: configs/experiments_rebuttal_timing_budget_levels.yaml (cheap and mid
+#         # budget levels, pMF and JiT in one job), run id timing_budget_levels
 #
 # Account, memory and CPUs come from `cluster.env` exactly as in submit.sh (account
 # auto-detected from ~/projects when there is exactly one).  The GPU is NOT taken from
@@ -25,8 +28,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 
 PRIOR="${1:-}"
 case "$PRIOR" in
-  pmf|jit|imf|sit|matched_time) shift ;;
-  *) echo "usage: bash submit_timing.sh pmf|jit|imf|sit|matched_time [--smoke] [--time HH:MM:SS] [--gpu G]"
+  pmf|jit|imf|sit|matched_time|budget_levels) shift ;;
+  *) echo "usage: bash submit_timing.sh pmf|jit|imf|sit|matched_time|budget_levels [--smoke] [--time HH:MM:SS] [--gpu G]"
      echo "       [--account A] [--mem M] [--cpus N] [--run-id ID] [--dry-run]"
      exit 2 ;;
 esac
@@ -50,7 +53,7 @@ while [ $# -gt 0 ]; do
     --cpus)    CPUS="$2";    shift 2 ;;
     --run-id)  RUN_ID="$2";  shift 2 ;;
     --dry-run) DRY=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) EXTRA+=("$1"); shift ;;
   esac
 done

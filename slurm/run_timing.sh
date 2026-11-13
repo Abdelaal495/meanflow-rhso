@@ -27,7 +27,7 @@ cd "$SLURM_SUBMIT_DIR"
 mkdir -p logs
 source activate_cluster.sh                # written by setup_cluster.sh
 
-PRIOR="${PRIOR:?set PRIOR=pmf|jit|imf|sit|matched_time}"
+PRIOR="${PRIOR:?set PRIOR=pmf|jit|imf|sit|matched_time|budget_levels}"
 # The run id is STABLE (not the Slurm job id), so a job resubmitted after a timeout lands in
 # the same run directory and scripts/run_timing.py skips every configuration already done.
 if [ "${SMOKE:-0}" = "1" ]; then
