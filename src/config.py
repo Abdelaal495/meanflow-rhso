@@ -336,7 +336,12 @@ RHSO_FIELDS: Tuple[str, ...] = (
     "rhso_jacobian_power_iters", "rhso_jacobian_seed",
     # TASK-ALIGNED endpoint authority; a separate, independently switchable measurement
     # from the random-direction Jacobian probes above.  Off by default.
-    "rhso_gradient_authority_diagnostics")
+    "rhso_gradient_authority_diagnostics",
+    # Time dependence of the state-anchor weight: stage k uses mu_k = mu * m(s_k).
+    # "constant" (the default, m = 1) is the objective RHSO has always had; "increasing"
+    # m(t) = (t^2 + (1-t)^2) / (1-t)^2 and "decreasing" (its reciprocal) are the
+    # alternatives.  See src/rhso.py (mu_schedule_multiplier).
+    "mu_schedule")
 
 # Flower (src/flower.py).  num_flower_steps is the iteration count N (one network
 # evaluation each); flower_gamma is 0 (the paper's reported setting) or 1 (adds a posterior
@@ -416,6 +421,8 @@ SWEEPABLE_FIELDS: Tuple[str, ...] = (
     "rhso_jacobian_seed", "rhso_gradient_authority_diagnostics",
     # Flower
     "num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol",
+    # RHSO anchor schedule
+    "mu_schedule",
 )
 MODEL_LEVEL_FIELDS: Tuple[str, ...] = ("guidance", "batch_size", "record_loss_history")
 
@@ -510,6 +517,8 @@ RHSO_DEFAULTS: Dict[str, Any] = {
     # NOT an untuned guess but a deliberate OFF switch: 0.0 is the vanilla objective, so
     # every RHSO configuration written before this field existed keeps its exact meaning.
     "mu": 0.0,
+    # Same reasoning: "constant" is the time-independent weight RHSO always used.
+    "mu_schedule": "constant",
 }
 UNTUNED = "repository_default_untuned"
 
@@ -825,6 +834,14 @@ def _validate_sweep_values(field_name: str, values: Sequence[Any], where: str, m
                     "    mu weights RHSO's state-anchor penalty "
                     "R = sum_b ||q_b - x_k,b||^2 / (2 d_b); mu = 0 (the default) disables "
                     "it and reproduces the plain terminal-fidelity objective." % (tag, v))
+        elif field_name == "mu_schedule":
+            from .rhso import VALID_MU_SCHEDULES
+            if not isinstance(v, str) or v not in VALID_MU_SCHEDULES:
+                raise ConfigError(
+                    "%s: unknown mu_schedule %r; valid: %s.\n"
+                    "    Stage k of RHSO uses mu_k = mu * m(s_k): 'constant' (the default) "
+                    "m = 1; 'increasing' m(t) = (t^2 + (1-t)^2) / (1-t)^2; 'decreasing' "
+                    "its reciprocal." % (tag, v, list(VALID_MU_SCHEDULES)))
         elif field_name == "rhso_terminal_mode":
             from .rhso import VALID_TERMINAL_MODES, resolve_terminal_mode
             if v not in VALID_TERMINAL_MODES:
@@ -1197,14 +1214,14 @@ def _validate_method_entry(config, problem, decl, problem_params, model_name, ca
                     "%s: 'solver' does not apply to PnP-Flow. Its prior step is a SINGLE "
                     "denoiser evaluation D_s(q) = q + (1 - s) v(q, s), not an ODE solve; there "
                     "is no trajectory to integrate." % where)
-            if key == "mu":
+            if key in ("mu", "mu_schedule"):
                 raise ConfigError(
-                    "%s: 'mu' is RHSO's state-anchor regularisation weight and does not "
+                    "%s: %r belongs to RHSO's state-anchor regularisation and does not "
                     "apply to %s.\n    It penalises how far the OPTIMISED STATE has moved "
                     "from the state the trajectory actually reached, which only exists in a "
                     "method that optimises a state in place.\n    MPC's control penalty is "
                     "a different quantity with a different name ('lam')."
-                    % (where, method_decl.title))
+                    % (where, key, method_decl.title))
             if key.startswith("rhso_"):
                 raise ConfigError(
                     "%s: %r configures RHSO's terminal planner / theory diagnostics and "
@@ -1413,6 +1430,9 @@ class JobSpec:
     # A separate measurement from the random-direction probes above, and like them an
     # EXTRA one: it never enters the objective, the gradients or the executed trajectory.
     rhso_gradient_authority_diagnostics: Optional[bool] = None
+    # Time dependence of the state-anchor weight ("constant" | "increasing" |
+    # "decreasing"); None for every method that is not RHSO.
+    mu_schedule: Optional[str] = None
 
     # -- resolved schedule metadata (derived; see src/schedule.py) ----------------------
     # delta_nominal_uniform is (1 - s0)/N for this method's own trajectory and is reported
@@ -1512,6 +1532,9 @@ class JobSpec:
             # pre-mu run would have produced, and job_id disambiguates regardless.
             if self.mu:
                 parts.append("mu=%g" % self.mu)
+            # Named only when it is NOT the constant default, so pre-existing paths stay.
+            if self.mu_schedule and self.mu_schedule != RHSO_DEFAULTS["mu_schedule"]:
+                parts.append("musched=%s" % self.mu_schedule)
             # Likewise for the terminal planner: named only when it is NOT the one this
             # family already used, so pre-existing paths are unchanged. A pMF job is
             # `direct` because it always was; a JiT job saying `direct` is the new planner
@@ -1580,7 +1603,10 @@ class JobSpec:
                        self.num_rhso_steps, (" %s" % self.solver) if self.solver else "",
                        self.num_opt_steps, self.lr,
                        (" mu=%g" % self.mu) if self.mu else "", self._beta_suffix,
-                       self._diagnostic_suffix))
+                       self._diagnostic_suffix
+                       + ((" mu_schedule=%s" % self.mu_schedule)
+                          if self.mu_schedule
+                          and self.mu_schedule != RHSO_DEFAULTS["mu_schedule"] else "")))
         if self.method == "flower":
             return ("%s | %s/%s | Flower | t0=%.2f N=%d gamma=%d%s"
                     % (self.experiment, self.model, self.problem, self.t0,
@@ -1638,6 +1664,8 @@ class JobSpec:
             # A mu sweep is the point of this field, so panels must never merge over it.
             if self.mu:
                 lines.append("mu=%g" % self.mu)
+            if self.mu_schedule and self.mu_schedule != RHSO_DEFAULTS["mu_schedule"]:
+                lines.append("mu %s" % self.mu_schedule)
         elif self.method == "flower":
             lines.append("Flower")
             lines.append("t0=%.2g N=%d" % (self.t0, self.num_flower_steps))
@@ -1757,6 +1785,7 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
     "rhso_lr": RHSO_DEFAULTS["lr"],
     "rhso_optimizer": RHSO_DEFAULTS["optimizer"],
     "mu": RHSO_DEFAULTS["mu"],
+    "mu_schedule": RHSO_DEFAULTS["mu_schedule"],
     "rhso_terminal_mode": RHSO_DEFAULTS["rhso_terminal_mode"],
     "rhso_stage_diagnostics": RHSO_DEFAULTS["rhso_stage_diagnostics"],
     "rhso_consistency_diagnostics": RHSO_DEFAULTS["rhso_consistency_diagnostics"],
@@ -1790,6 +1819,8 @@ SWEEP_ORDER: Tuple[str, ...] = (
     "rhso_gradient_authority_diagnostics",
     # Flower: appended for the same reason.
     "num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol",
+    # RHSO anchor schedule: appended for the same reason.
+    "mu_schedule",
 )
 
 
@@ -1985,6 +2016,8 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                     # `builtin`, not UNTUNED: 0.0 is not a guess at a good weight, it is the
                     # feature being off. A row whose source reads `builtin` had no penalty.
                     axis("mu", BUILTIN_DEFAULTS["mu"])
+                    # `builtin`: "constant" is the time-independent weight, not a guess.
+                    axis("mu_schedule", BUILTIN_DEFAULTS["mu_schedule"])
                     axis("optimizer", BUILTIN_DEFAULTS["rhso_optimizer"])
                     # `builtin` again, not UNTUNED: "auto" reproduces the family's existing
                     # planner and every diagnostic starts off.
@@ -2169,6 +2202,10 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                                 ("jacobian", values["rhso_jacobian_probes"],
                                  values["rhso_jacobian_power_iters"],
                                  values["rhso_jacobian_seed"]))
+                        # Only a NON-constant schedule enters the identity, so every job
+                        # written before the field existed keeps its id and directory.
+                        if values["mu_schedule"] not in (None, RHSO_DEFAULTS["mu_schedule"]):
+                            identity_extras.append(("mu_schedule", values["mu_schedule"]))
                     # Flower's own fields, appended only for Flower jobs: every other job
                     # keeps the id it had before the method existed.
                     if method_name == "flower":
@@ -2264,6 +2301,8 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                             None if values["rhso_gradient_authority_diagnostics"] is None
                             else bool(values["rhso_gradient_authority_diagnostics"])),
                         measurement_noise_group=noise_group,
+                        mu_schedule=(str(values["mu_schedule"])
+                                     if values["mu_schedule"] is not None else None),
                         num_flower_steps=(int(values["num_flower_steps"])
                                           if values["num_flower_steps"] is not None else None),
                         flower_gamma=(int(values["flower_gamma"])
@@ -2563,6 +2602,10 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
                                  _axis(sel, "num_opt_steps", "%s"), _axis(sel, "lr", "%g")))
                         print("      mu %s   (0 = no state-anchor penalty)"
                               % _axis(sel, "mu", "%g"))
+                        if any(s.mu_schedule not in (None, RHSO_DEFAULTS["mu_schedule"])
+                               for s in sel):
+                            print("      mu schedule %s   (stage k: mu_k = mu * m(s_k))"
+                                  % _axis(sel, "mu_schedule"))
                         print("      terminal planner %s -> %s"
                               % (_axis(sel, "rhso_terminal_mode"),
                                  _axis(sel, "rhso_terminal_planner")))

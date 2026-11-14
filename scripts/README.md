@@ -11,6 +11,7 @@
 | `make_matched_time_config.py`, `matched_time_table.py` | rebuttal Task 5: the matched-time configurations on pMF and JiT (each method's budget knob set so it takes RHSO's measured time; 100-image quality config, timing config at batch size 1, smoke variants), and the table of seconds per image, quality and paired differences against RHSO |
 | `make_budget_level_config.py`, `budget_level_table.py` | rebuttal Task 6: the cheap and mid budget levels on pMF and JiT (RHSO, MPC-Δt, D-Flow and MPC-RHC with their step knob set to the cheap methods' time and 4× that; 100-image quality config, timing config at batch size 1, smoke variants), and the per-level table: each method's lowest-LPIPS run within 1.1× the budget, paired differences against the level's best, wins and ties |
 | `make_budget_level_lrscaled_config.py` | rebuttal Task 7: Task 6's 66 budget-level entries with only the learning rate changed, `lr × (tuned knob / new knob)`, 100-image config and smoke variant; `budget_level_table.py --timing-ignore lr` pairs them with Task 6's timing run |
+| `make_anchor_schedule_tuning.py`, `freeze_anchor_schedules.py`, `anchor_schedule_table.py` | rebuttal Task 8: RHSO with a time-dependent state anchor (`mu_schedule`) on pMF; the mu0 tuning grid (22 per task on 8 tuning images, fields from the frozen entries), the freeze step (lowest LPIPS per task and schedule, 100-image config, tuning curves) and the 100-image table with paired differences against the retuned constant schedule |
 | `check_fingerprints.py` | fails loudly unless every job of a Flower or matched-budget run has the benchmark run's measurement and initial-state fingerprints |
 | `extract_imagenet100_from_tar.py` | the same pool from a local ImageNet tar instead of the mirror |
 | `export_recon_bundle_only.py`, `add_corrupted_images_to_bundle.py` | package a run's reconstructions for sharing |
@@ -240,3 +241,27 @@ python scripts/budget_level_table.py --timing-ignore lr --quality outputs/<lr-sc
 `--timing-ignore lr` leaves lr out of the quality-to-timing pairing (when several timing jobs
 then agree it prefers the same variant, then the Task 6 variant). The `_lr` runs are labelled
 "cheap level, lr scaled" and "mid level, lr scaled". Without the option nothing changes.
+
+## RHSO anchor schedules (rebuttal Task 8)
+
+RHSO's stage-k weight becomes `mu_k = mu0 * m(t_k)` (`mu_schedule`: `constant` m = 1, the
+default; `increasing` m = (t² + (1−t)²)/(1−t)²; `decreasing` its reciprocal; t_k = grid[k]).
+On pMF every task retunes mu0 per schedule over {0.01, 0.03, 0.1, 0.3, 1, 3, 10} plus one
+shared mu0 = 0 run, with every other field copied from the task's pMF `__rhso` entry of
+`experiments_final_frozen100.yaml`, on the first 8 images of the tuning pool (batch 4).
+
+```bash
+python scripts/make_anchor_schedule_tuning.py           # tuning config (110 jobs) + 2-image smoke
+python scripts/freeze_anchor_schedules.py --from outputs/<tuning run> --out-dir outputs/anchor_schedule_tuning_curves
+python scripts/anchor_schedule_table.py --final outputs/<final run> --reference outputs/run_9187465     --out-dir outputs/anchor_schedule_table
+```
+
+`freeze` picks, per (task, schedule), the lowest-LPIPS mu0 (ties to the smaller mu0; mu0 = 0
+is a candidate of every schedule) and writes `configs/experiments_anchor_schedule_frozen100.yaml`
+(100 images, benchmark pool and pMF batch sizes). Schedules of one task that all select
+mu0 = 0 share one run, in a block named for each of them
+(`<task>__anchor_constant_increasing`). It also writes the LPIPS / PSNR tuning curves as CSV
+and LaTeX. The table reports, per task and schedule, mu0, PSNR / SSIM / LPIPS, the job-level
+measurement RMSE next to σ and `schedule − constant` with `paired_stats.py`'s bootstrap
+(10,000 resamples, seed 20260903), plus the paper's frozen RHSO from run_9187465 as unpaired
+means (it ran on a different GPU type).

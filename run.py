@@ -554,6 +554,9 @@ def warmup_key(spec, problem) -> Tuple:
             # decides WHICH computation the objective is (one endpoint prediction versus an
             # integrated suffix), and the diagnostics add traced computations of their own.
             spec.num_rhso_steps, spec.mu, spec.rhso_terminal_mode,
+            # The anchor schedule selects which objective is traced (constant: mu closed
+            # over; increasing / decreasing: mu_k passed as an argument).
+            getattr(spec, "mu_schedule", None),
             spec.rhso_stage_diagnostics, spec.rhso_consistency_diagnostics,
             spec.rhso_jacobian_diagnostics, spec.rhso_gradient_authority_diagnostics,
             # Flower: N fixes the time grid; gamma adds the posterior-sample computation;
@@ -577,6 +580,8 @@ RESULT_COLUMNS = [
     # PnP-Flow / D-Flow / RHSO hyperparameters
     "num_pnp_steps", "gamma0", "alpha", "noise_samples", "num_opt_steps", "num_rhso_steps",
     "mu",
+    # RHSO anchor schedule ("constant" | "increasing" | "decreasing"; None off RHSO)
+    "mu_schedule",
     # Flower hyperparameters
     "num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol",
     "hyperparameter_source_lam", "hyperparameter_source_n_ctrl", "hyperparameter_source_lr",
@@ -661,6 +666,7 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "num_pnp_steps": spec.num_pnp_steps, "gamma0": spec.gamma0, "alpha": spec.alpha,
         "noise_samples": spec.noise_samples, "num_opt_steps": spec.num_opt_steps,
         "num_rhso_steps": spec.num_rhso_steps, "mu": spec.mu,
+        "mu_schedule": getattr(spec, "mu_schedule", None),
         "num_flower_steps": spec.num_flower_steps, "flower_gamma": spec.flower_gamma,
         "flower_cg_max_iters": spec.flower_cg_max_iters, "flower_cg_tol": spec.flower_cg_tol,
         "hyperparameter_source_lam": spec.hyperparameter_sources.get("lam"),
@@ -838,6 +844,14 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
     out.mkdir(parents=True, exist_ok=True)
     payload = dict(record)
     payload["resolved_spec"] = spec.to_dict()
+    if spec.method == "rhso" and getattr(spec, "mu_schedule", None) not in (None, "constant"):
+        # The per-stage anchor weights actually used, mu_k = mu * m(s_k). Written only for a
+        # non-constant schedule, so a default job's metadata keeps its previous keys.
+        from src.rhso import rhso_stage_mus
+        grid = rhso_time_grid(spec)
+        payload["rhso_mu_schedule"] = {"schedule": spec.mu_schedule, "mu": spec.mu,
+                                       "stage_times": grid[:-1],
+                                       "stage_mu": rhso_stage_mus(spec)}
     payload["problem_metadata"] = problem.to_metadata()
     payload["per_image"] = {k: metrics.get(k) for k in
                             ("psnr_per_image", "ssim_per_image", "lpips_per_image")}
@@ -917,7 +931,8 @@ NEW_SPEC_FIELDS: Tuple[str, ...] = (
     "rhso_stage_diagnostics", "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics",
     "rhso_jacobian_probes", "rhso_jacobian_power_iters", "rhso_jacobian_seed",
     "rhso_gradient_authority_diagnostics", "measurement_noise_group",
-    "num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol")
+    "num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol",
+    "mu_schedule")
 
 
 def _describes_legacy_behaviour(name: str, current: Dict[str, Any]) -> bool:
@@ -949,6 +964,9 @@ def _describes_legacy_behaviour(name: str, current: Dict[str, Any]) -> bool:
     if name in ("num_flower_steps", "flower_gamma", "flower_cg_max_iters", "flower_cg_tol"):
         # Only a job of another method can predate Flower; for it these are all None.
         return value is None
+    if name == "mu_schedule":
+        # Every RHSO run before the field existed used a time-independent mu.
+        return value in (None, "constant")
     return True
 
 

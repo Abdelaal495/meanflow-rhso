@@ -181,6 +181,9 @@ def config_label(row: Dict[str, Any]) -> str:
     elif method == "rhso":
         parts = ["RHSO", "N=%s" % row.get("num_rhso_steps"),
                  "opt=%s" % row.get("num_opt_steps"), "lr=%g" % (row.get("lr") or 0)]
+        # Named only off the default, so existing labels are unchanged.
+        if row.get("mu_schedule") not in (None, "", "constant"):
+            parts.append("mu-%s" % row.get("mu_schedule"))
     elif method == "flower":
         parts = ["Flower", "N=%s" % row.get("num_flower_steps")]
         if str(row.get("flower_gamma") or 0) not in ("0", "0.0"):

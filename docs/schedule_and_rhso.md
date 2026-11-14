@@ -153,9 +153,31 @@ L_k(q) = Φ( G_{s_k → 1}(q) )  +  μ · R(q, x_k)
 * **Divided by `d_b`**, the number of scalar state dimensions per sample, so a useful `μ`
   does not scale with image or latent dimensionality — a pixel model and a latent model are
   on comparable footing. An unnormalised `‖q − x_k‖²` would not be.
-* **No `σ²`, `dt`, `beta` or time dependence.** `μ` is the only weight in this iteration.
+* **No `σ²`, `dt` or `beta`.** By default (`mu_schedule: constant`) `μ` is also the same at
+  every stage; the optional schedules below make it time dependent.
 * The penalty contains **no generative-model evaluation**, so every compute counter and
   every dry-run cost estimate is unchanged (verified by a check, not asserted).
+
+### Anchor schedules (`mu_schedule`) — optional, `constant` by default
+
+Stage `k` uses `μ_k = μ₀ · m(s_k)`, with `μ₀ = mu` and `s_k = grid[k]` the stage's time on
+the canonical clock (0 = noise, 1 = data):
+
+| `mu_schedule` | `m(t)` | at `t0 = 1`, `β = 1`, N = 8: `t_k = k/8` |
+|---|---|---|
+| `constant` (default) | `1` | 1 at every stage |
+| `increasing` | `(t² + (1−t)²) / (1−t)²` | 1, 1.0204, 1.1111, 1.36, 2, 3.7778, 10, 50 |
+| `decreasing` | `(1−t)² / (t² + (1−t)²)` | the reciprocals |
+
+Exact formulas, no clipping or smoothing; RHSO only optimises at `s_k < 1`, so both are
+finite. `constant` (or the field absent) runs the original code path statement for
+statement and reproduces its outputs bit for bit. On the JAX loop the non-constant schedules
+pass `μ_k` into the differentiated objective as an array argument, so every stage runs the
+same computation on new data. The schedule changes no count, grid or execution step, joins
+the job id and the output directory (`musched=...`) only when it is not `constant`, is part
+of `warmup_key`, and is the `mu_schedule` column of `results.csv`; a non-constant job also
+records its per-stage `μ_k` under `rhso_mu_schedule` in `metadata.json`. With
+`record_loss_history`, `loss = fidelity + μ_k · R` holds per stage.
 
 `μ` is *not* MPC's `λ`. MPC's `λ` weights the magnitude of an **added control signal** `u`
 in a dynamics that RHSO does not have; `μ` weights a **displacement of the state** from
@@ -255,8 +277,8 @@ present in the same file — because no other method here optimises a state in p
 `optimizer: adam` is the only supported value in this iteration. `solver` is meaningless for
 MeanFlow RHSO and must be rejected there, exactly as it is for the other MeanFlow methods.
 Deliberately **absent**: `lam`, `control_cost_normalization`, `K`, `warm_start`, `tau`,
-`alpha_min`, adaptive horizons, adaptive or time-dependent `mu`, and any new noise
-hyperparameter.
+`alpha_min`, adaptive horizons, adaptive `mu` (beyond the fixed `mu_schedule` shapes above),
+and any new noise hyperparameter.
 
 ### Cost accounting
 

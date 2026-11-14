@@ -59,6 +59,11 @@ about the schedule, the planner, the execution step, the Adam reset or the cost 
 changes: the penalty contains no model evaluation.  mu is an EXPERIMENTAL extension
 motivated by observed over-optimisation, not a theoretical requirement.
 
+`mu_schedule` (default "constant") optionally makes the weight time dependent: stage k uses
+mu_k = mu * m(s_k), with m = 1 (constant), (t^2 + (1-t)^2) / (1-t)^2 (increasing) or its
+reciprocal (decreasing).  "constant" is today's objective, statement for statement; the
+schedule changes no count, no grid and no execution step.
+
 Family differences (both are implemented; neither is a special case of the other)
 --------------------------------------------------------------------------------
 STANDARD FLOW (JiT, SiT) -- two terminal planners, chosen by `rhso_terminal_mode`
@@ -254,6 +259,70 @@ def rhso_mu(spec) -> float:
     return mu
 
 
+# =====================================================================================
+# Time-dependent anchor schedules
+# =====================================================================================
+# The stage coefficient is mu_k = mu * m(s_k), with s_k = grid[k] the stage's time on the
+# canonical clock (0 = noise, 1 = data) and mu the configured `mu` field:
+#
+#   constant     m(t) = 1                                   (the default; today's RHSO)
+#   increasing   m(t) = (t^2 + (1 - t)^2) / (1 - t)^2
+#   decreasing   m(t) = (1 - t)^2 / (t^2 + (1 - t)^2)
+#
+# Exact formulas: no clipping, no normalisation, no smoothing constant.  RHSO optimises only
+# at s_k < 1 (the last stage starts at s_{N-1} < 1), so both are finite on every stage.
+MU_SCHEDULE_CONSTANT = "constant"
+MU_SCHEDULE_INCREASING = "increasing"
+MU_SCHEDULE_DECREASING = "decreasing"
+VALID_MU_SCHEDULES = (MU_SCHEDULE_CONSTANT, MU_SCHEDULE_INCREASING, MU_SCHEDULE_DECREASING)
+
+
+def resolve_mu_schedule(schedule) -> str:
+    """Validated schedule name.  `None` (a spec predating the field) -> "constant"."""
+    if schedule is None:
+        return MU_SCHEDULE_CONSTANT
+    schedule = str(schedule)
+    if schedule not in VALID_MU_SCHEDULES:
+        raise ValueError("Unknown mu_schedule %r; valid: %s"
+                         % (schedule, list(VALID_MU_SCHEDULES)))
+    return schedule
+
+
+def spec_mu_schedule(spec) -> str:
+    """The resolved anchor schedule of one job (absent -> constant, i.e. today's RHSO)."""
+    return resolve_mu_schedule(getattr(spec, "mu_schedule", None))
+
+
+def mu_schedule_multiplier(schedule: str, t: float) -> float:
+    """m(t) of one schedule at canonical time t; see the table above."""
+    schedule = resolve_mu_schedule(schedule)
+    if schedule == MU_SCHEDULE_CONSTANT:
+        return 1.0
+    t = float(t)
+    if not 0.0 <= t < 1.0:
+        raise ValueError("mu_schedule %r is defined for stage times 0 <= t < 1, got t=%r; "
+                         "RHSO never optimises at t = 1." % (schedule, t))
+    gap = (1.0 - t) * (1.0 - t)
+    total = t * t + gap
+    if schedule == MU_SCHEDULE_INCREASING:
+        return total / gap
+    return gap / total
+
+
+def rhso_stage_mu(mu: float, schedule: str, t: float) -> float:
+    """mu_k = mu * m(t_k).  For "constant" this is `mu` itself, not mu * 1.0."""
+    if resolve_mu_schedule(schedule) == MU_SCHEDULE_CONSTANT:
+        return mu
+    return mu * mu_schedule_multiplier(schedule, t)
+
+
+def rhso_stage_mus(spec) -> List[float]:
+    """[mu_0, ..., mu_{N-1}] of one resolved job, on its own outer grid (for metadata/tests)."""
+    grid = rhso_time_grid(spec)
+    mu, schedule = rhso_mu(spec), spec_mu_schedule(spec)
+    return [rhso_stage_mu(mu, schedule, grid[k]) for k in range(len(grid) - 1)]
+
+
 def state_anchor_penalty(B, q, anchor):
     """R(q, x_k) = sum_b (1 / 2 d_b) * ||q_b - x_{k,b}||^2 -- one implementation, both families.
 
@@ -289,6 +358,19 @@ def rhso_total_objective(B, fidelity, q, anchor, mu: float):
     if mu == 0.0:
         return fidelity, penalty
     return fidelity + mu * penalty, penalty
+
+
+def rhso_scheduled_objective(B, fidelity, q, anchor, mu_stage):
+    """(total, R) with the stage coefficient as a (possibly traced) ARRAY argument.
+
+    Used only by the non-constant anchor schedules on the JAX loop.  `mu_stage` is an
+    argument of the differentiated function rather than a Python constant baked into it, so
+    a new stage value is new DATA for the same computation, never a new one.  There is no
+    `mu == 0` branch here because a traced value cannot drive Python control flow; at
+    mu_stage = 0 the total is fidelity + 0 * R, numerically the fidelity.
+    """
+    penalty = state_anchor_penalty(B, q, anchor)
+    return fidelity + mu_stage * penalty, penalty
 
 
 def _require_adam(spec) -> None:
@@ -404,6 +486,7 @@ def _prepare(adapter: ModelAdapter, problem, spec):
         "N": int(_field(spec, "num_rhso_steps")),
         "M": int(_field(spec, "num_opt_steps")),
         "mu": rhso_mu(spec),
+        "mu_schedule": spec_mu_schedule(spec),
         "terminal_mode": terminal_mode,
         "settings": settings,
     }
@@ -464,6 +547,7 @@ def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
     B, phi, log_scale = setup["B"], setup["phi"], setup["log_scale"]
     grid, N, M, mu = setup["grid"], setup["N"], setup["M"], setup["mu"]
     terminal_mode, settings = setup["terminal_mode"], setup["settings"]
+    mu_schedule = setup["mu_schedule"]
 
     stats = ReconstructionStats()
     recorder = _make_recorder(adapter, cond, spec, problem, grid, settings, terminal_mode,
@@ -473,6 +557,10 @@ def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
 
     for k in range(N):
         s_k, s_next = grid[k], grid[k + 1]
+        # The stage's anchor coefficient.  "constant" passes `mu` itself, unchanged, so the
+        # default objective is exactly the one this loop always built.
+        mu_k = (mu if mu_schedule == MU_SCHEDULE_CONSTANT
+                else rhso_stage_mu(mu, mu_schedule, s_k))
         per_objective = rhso_planning_evaluations(adapter, spec, k, grid)
         # ONE place decides what the inner objective differentiates through.
         terminal_of = make_terminal_planner(adapter, cond, spec, grid, k, terminal_mode)
@@ -496,7 +584,7 @@ def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
             adapter.reset_counters()
             terminal = terminal_of(q)
             fidelity = phi(adapter.to_pixels(terminal, differentiable=True))
-            loss, penalty = rhso_total_objective(B, fidelity, q, x_anchor, mu)
+            loss, penalty = rhso_total_objective(B, fidelity, q, x_anchor, mu_k)
             loss.backward()
             opt.step()
 
@@ -570,6 +658,7 @@ def meanflow_rhso(adapter: MeanFlowAdapter, cond: Conditioning, x0, problem,
     B, phi, log_scale = setup["B"], setup["phi"], setup["log_scale"]
     grid, N, M, mu = setup["grid"], setup["N"], setup["M"], setup["mu"]
     terminal_mode, settings = setup["terminal_mode"], setup["settings"]
+    mu_schedule = setup["mu_schedule"]
 
     stats = ReconstructionStats()
     recorder = _make_recorder(adapter, cond, spec, problem, grid, settings, terminal_mode,
@@ -590,15 +679,32 @@ def meanflow_rhso(adapter: MeanFlowAdapter, cond: Conditioning, x0, problem,
         # gradient flows to q only, and nothing rebinds it during the M inner iterations.
         x_anchor = jax.lax.stop_gradient(x)
 
-        def loss_fn(q, _anchor=x_anchor, _terminal=terminal_of):
-            terminal = _terminal(q)                              # ONE direct transition
-            fidelity = phi(adapter.to_pixels(terminal, differentiable=True))
-            total, penalty = rhso_total_objective(B, fidelity, q, _anchor, mu)
-            return total, (fidelity, penalty)
+        if mu_schedule == MU_SCHEDULE_CONSTANT:
+            def loss_fn(q, _anchor=x_anchor, _terminal=terminal_of):
+                terminal = _terminal(q)                          # ONE direct transition
+                fidelity = phi(adapter.to_pixels(terminal, differentiable=True))
+                total, penalty = rhso_total_objective(B, fidelity, q, _anchor, mu)
+                return total, (fidelity, penalty)
 
-        # has_aux keeps the diagnostics out of the differentiated scalar: the gradient is
-        # of `total` alone, so mu = 0 reproduces the pre-penalty gradient exactly.
-        value_and_grad = jax.value_and_grad(loss_fn, has_aux=True)
+            # has_aux keeps the diagnostics out of the differentiated scalar: the gradient
+            # is of `total` alone, so mu = 0 reproduces the pre-penalty gradient exactly.
+            value_and_grad = jax.value_and_grad(loss_fn, has_aux=True)
+        else:
+            # Time-dependent anchor: mu_k enters as an ARGUMENT of the differentiated
+            # function (argnums=0 still differentiates q only), so every stage runs the same
+            # computation on new data, and the warm-up's stages cover the timed run's.
+            mu_k = jnp.asarray(rhso_stage_mu(mu, mu_schedule, s_k), dtype=x_anchor.dtype)
+
+            def scheduled_loss_fn(q, mu_stage, _anchor=x_anchor, _terminal=terminal_of):
+                terminal = _terminal(q)                          # ONE direct transition
+                fidelity = phi(adapter.to_pixels(terminal, differentiable=True))
+                total, penalty = rhso_scheduled_objective(B, fidelity, q, _anchor, mu_stage)
+                return total, (fidelity, penalty)
+
+            scheduled_value_and_grad = jax.value_and_grad(scheduled_loss_fn, has_aux=True)
+
+            def value_and_grad(q, _vg=scheduled_value_and_grad, _mu_stage=mu_k):
+                return _vg(q, _mu_stage)
 
         # Fresh variable, fresh Adam moments -- see the standard-flow twin.
         q = x_anchor

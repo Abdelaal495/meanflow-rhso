@@ -24,6 +24,7 @@ python tests/test_timing_configs.py         # needs jax + pyyaml (imports run.py
 python tests/test_matched_time.py           # needs jax + pyyaml (imports run.py)
 python tests/test_budget_levels.py          # needs jax + pyyaml (imports run.py), bash
 python tests/test_budget_levels_lrscaled.py # needs jax + pyyaml (imports run.py)
+python tests/test_anchor_schedules.py       # needs jax + optax + torch + pyyaml (imports run.py), git
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -230,6 +231,22 @@ source, the level and the lr scaling. On synthetic runs `budget_level_table.py` 
 `_lr` variants, leaves them unpaired by default, pairs them with Task 6's timing jobs under
 `--timing-ignore lr` (preferring Task 6's over another variant's with the same knob), and
 rejects any other field.
+
+`test_anchor_schedules.py` covers RHSO's time-dependent state anchor `mu_schedule` (rebuttal
+Task 8): the multipliers at N = 8 and N = 4 equal the task's table and decreasing is the
+reciprocal of increasing; the five pMF frozen RHSO entries have stage times k/N; with the
+field absent, None, defaulted or explicitly `constant`, both loops (JAX MeanFlow, PyTorch
+standard flow) reproduce `src/rhso.py` as of commit 347a4a1, loaded from git, bit for bit on
+synthetic adapters; explicit `constant` is the default job (id, directory, spec; only the
+provenance differs); counts and cost estimates do not depend on the schedule; the
+non-constant schedules satisfy loss = fidelity + mu_k R per stage, pass mu_k to the JAX
+objective as an array, and coincide at mu0 = 0; the field is validated, sweepable, a warm-up
+key, a results column and a resume rule. It also regenerates the tuning configuration (22
+per task, fields copied from the frozen entries, tuning pool / 8 images / batch 4), runs the
+freeze script on a planted tuning run (selection, shared mu0 = 0 blocks, frozen config
+resolving at 100 images with the benchmark batch sizes, tuning curves, incomplete grids
+refused) and the table script on planted runs (paired_stats bootstrap, "same run" rows,
+unpaired reference row).
 
 `test_matched_configs.py`, `test_hpo_lock.py` and `test_paired_stats.py` cover the
 matched-budget comparison of RHSO and MPC-Δt (rebuttal Task 2). The first resolves the
