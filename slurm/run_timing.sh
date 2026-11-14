@@ -27,13 +27,16 @@ cd "$SLURM_SUBMIT_DIR"
 mkdir -p logs
 source activate_cluster.sh                # written by setup_cluster.sh
 
-PRIOR="${PRIOR:?set PRIOR=pmf|jit|imf|sit|matched_time|budget_levels}"
+PRIOR="${PRIOR:?set PRIOR=pmf|jit|imf|sit|matched_time|budget_levels|pmf_exact|jitl}"
 # The run id is STABLE (not the Slurm job id), so a job resubmitted after a timeout lands in
 # the same run directory and scripts/run_timing.py skips every configuration already done.
 if [ "${SMOKE:-0}" = "1" ]; then
   CONFIG="configs/experiments_rebuttal_timing_${PRIOR}_smoke.yaml"
   RUN_ID="${TIMING_RUN_ID:-timing_${PRIOR}_smoke}"
   EXTRA=(--with-checks)
+  # Task 9: run.py's checks allocate GPU memory inside the measured process, which would
+  # void the exact JAX peak, so the pmf_exact smoke runs without them.
+  if [ "$PRIOR" = "pmf_exact" ]; then EXTRA=(); fi
 else
   CONFIG="configs/experiments_rebuttal_timing_${PRIOR}.yaml"
   RUN_ID="${TIMING_RUN_ID:-timing_${PRIOR}}"

@@ -34,6 +34,16 @@ Memory
         (``make_jax_sampler``), plus the snapshots on either side of the region.  When the
         upper bound equals the model-only baseline's load peak it was set by loading the
         model, and scripts/summarize_timing.py flags it as uninformative.
+
+Exact JAX peak (rebuttal Task 9, opt-in)
+    With pMF's `param_loading: host_once` (set only by the pmf_exact timing configs) the
+    model load no longer sets the lifetime peak, so `exact_jax_peak` can report ONE exact
+    figure per configuration -- or flag the configuration with the reason it cannot.  A
+    snapshot before the warm-up (taken in every timing run) proves nothing else raised the
+    peak between the load and this configuration's warm-up.  The figure includes the
+    resident parameters, like torch.cuda.max_memory_allocated, and covers the warm-up as
+    well as the timed region (same method, same shapes); it would also include any device
+    scratch the XLA compiler allocates through the same allocator during the warm-up.
 """
 
 from __future__ import annotations
@@ -408,24 +418,120 @@ def _jax_field(snapshot: Optional[Dict[str, Any]], key: str) -> Optional[int]:
     return stats.get(key)
 
 
+# =====================================================================================
+# Exact JAX peak (rebuttal Task 9; opt-in through pMF's `param_loading: host_once`)
+# =====================================================================================
+# JAX's peak_bytes_in_use is a lifetime high-water mark with no reset.  With the default
+# pMF loader it is set by MODEL LOADING (5 x the resident parameters, see
+# src/models/pmf.py `_host_loading_scope`), so it says nothing about the method.  With
+# `host_once` loading the load peak is the resident parameters themselves.  Then, in a
+# process that runs ONE configuration, a lifetime peak ABOVE the peak seen just before the
+# warm-up was reached by the warm-up or the timed region -- the same method at the same
+# shapes -- so it is that configuration's allocator high-water mark exactly: the analogue
+# of torch.cuda.max_memory_allocated (which also counts the resident weights).
+EXACT_LOAD_SLACK_BYTES = 64 * 2 ** 20      # "load peak close to bytes_in_use": <= 64 MiB ...
+EXACT_LOAD_SLACK_FRACTION = 0.02           # ... or 2% of the resident bytes, whichever is larger
+EXACT_JAX_LOADING = ("host_once",)
+
+
+def load_slack_bytes(in_use: Optional[int]) -> int:
+    return max(EXACT_LOAD_SLACK_BYTES, int(EXACT_LOAD_SLACK_FRACTION * float(in_use or 0)))
+
+
+def exact_jax_peak(snapshots: Dict[str, Optional[Dict[str, Any]]]) -> Dict[str, Any]:
+    """{exact, peak_bytes, scope, reasons} for a host_once-loaded JAX configuration.
+
+    Exact iff (1) the load peak is within the slack of the bytes in use after loading,
+    (2) nothing between the load and the warm-up raised the peak beyond that slack, and
+    (3) the final lifetime peak exceeds the peak seen just before the warm-up.  Otherwise
+    `reasons` says which condition failed, and the caller flags the configuration.
+    """
+    load = (snapshots.get("after_model_load") or {}).get("jax") or {}
+    warm = (snapshots.get("before_warm_up") or {}).get("jax") or {}
+    pre = (snapshots.get("before_timed_region") or {}).get("jax") or {}
+    post = (snapshots.get("after_timed_region") or {}).get("jax") or {}
+    reasons = []
+    load_peak, load_in_use = load.get("peak_bytes_in_use"), load.get("bytes_in_use")
+    warm_peak = warm.get("peak_bytes_in_use")
+    pre_peak, post_peak = pre.get("peak_bytes_in_use"), post.get("peak_bytes_in_use")
+    if None in (load_peak, load_in_use, warm_peak, post_peak):
+        reasons.append("a memory snapshot is missing (after_model_load, before_warm_up or "
+                       "after_timed_region)")
+    else:
+        slack = load_slack_bytes(load_in_use)
+        if load_peak - load_in_use > slack:
+            reasons.append("model load peak %.3f GiB exceeds the %.3f GiB in use after loading "
+                           "by more than %.0f MiB" % (load_peak / GIB, load_in_use / GIB,
+                                                       slack / 2 ** 20))
+        if warm_peak - load_peak > slack:
+            reasons.append("the peak rose by %.3f GiB between the model load and the warm-up "
+                           "(something else ran in this process)" % ((warm_peak - load_peak) / GIB))
+        if post_peak <= warm_peak:
+            reasons.append("the lifetime peak (%.3f GiB) did not rise above the peak before the "
+                           "warm-up (%.3f GiB)" % (post_peak / GIB, warm_peak / GIB))
+    exact = not reasons
+    scope = None
+    if exact:
+        scope = ("timed_region" if pre_peak is not None and post_peak > pre_peak
+                 else "warm_up (the same method at the timed region's shapes)")
+    return {"exact": exact, "peak_bytes": post_peak, "scope": scope, "reasons": reasons,
+            "load_peak_bytes": load_peak, "load_in_use_bytes": load_in_use,
+            "before_warm_up_peak_bytes": warm_peak}
+
+
 class TimingDetail:
     """Everything the timing run records for ONE atomic job."""
 
     def __init__(self, framework: Optional[str],
-                 after_load: Optional[Dict[str, Any]] = None):
+                 after_load: Optional[Dict[str, Any]] = None,
+                 before_warm_up: Optional[Dict[str, Any]] = None,
+                 param_loading: Optional[str] = None):
         self.framework = framework
         self.timer = ChunkTimer(framework)
         # Set by run.py from attach_jax_sampler(profiler) on the JAX NVML path.
         self.jax_sampler: Optional[Any] = None
+        # How the model's parameters were loaded (pMF: "device" or "host_once"); only
+        # "host_once" switches on the exact JAX peak.  None for every other adapter.
+        self.param_loading = param_loading
         self.snapshots: Dict[str, Optional[Dict[str, Any]]] = {
             "after_model_load": after_load, "before_timed_region": None,
             "after_timed_region": None}
+        if before_warm_up is not None:
+            self.snapshots["before_warm_up"] = before_warm_up
 
     def snapshot(self, label: str) -> None:
         self.snapshots[label] = memory_snapshot(self.framework)
 
     def allocator_peak(self, memory: Dict[str, Any]) -> Dict[str, Any]:
         """The PRIMARY memory figure, with the scope it is valid for."""
+        if self.framework == "jax" and self.param_loading in EXACT_JAX_LOADING:
+            return self._exact_jax_peak()
+        return self._allocator_peak_task1(memory)
+
+    def _exact_jax_peak(self) -> Dict[str, Any]:
+        """The host_once mode: one number, exact or flagged (never a silent bracket)."""
+        result = exact_jax_peak(self.snapshots)
+        peak = result["peak_bytes"]
+        return {"allocator_peak_gib": _gib(peak) if result["exact"] else None,
+                "allocator_baseline_gib": _gib(result["load_in_use_bytes"]),
+                "allocator_peak_source": "jax peak_bytes_in_use, lifetime of a one-configuration "
+                                         "process whose parameters were loaded host_once",
+                "allocator_peak_scope": result["scope"],
+                "allocator_peak_exact": bool(result["exact"]),
+                "allocator_peak_mode": "exact_jax_host_once",
+                "allocator_peak_not_exact_reasons": result["reasons"],
+                "allocator_peak_lower_gib": _gib(peak) if result["exact"] else None,
+                "allocator_peak_upper_gib": _gib(peak),
+                "allocator_peak_upper_bytes": None if peak is None else int(peak),
+                "allocator_peak_bytes": int(peak) if (result["exact"] and peak is not None) else None,
+                "jax_load_peak_bytes": result["load_peak_bytes"],
+                "jax_load_in_use_bytes": result["load_in_use_bytes"],
+                "jax_before_warm_up_peak_bytes": result["before_warm_up_peak_bytes"],
+                "param_loading": self.param_loading,
+                "jax_bytes_in_use_samples": int(getattr(self.jax_sampler, "jax_samples", 0) or 0)}
+
+    def _allocator_peak_task1(self, memory: Dict[str, Any]) -> Dict[str, Any]:
+        """Task 1's figure: exact on PyTorch; on JAX exact or a lower--upper bracket."""
         if self.framework == "torch":
             exact = memory.get("gpu_memory_source") == "torch.cuda.max_memory_allocated"
             value = memory.get("gpu_peak_gib") if exact else None
@@ -510,7 +616,17 @@ def model_only_baseline(adapter: Any, model: str) -> Dict[str, Any]:
         allocated = torch_stats.get("memory_allocated")
     else:
         allocated = jax_stats.get("bytes_in_use")
-    return {"model": model, "framework": framework,
+    extra: Dict[str, Any] = {}
+    loading = getattr(adapter, "param_loading", None)
+    if framework == "jax" and loading in EXACT_JAX_LOADING:
+        # Task 9: the load must not set a peak above the resident parameters.
+        peak, in_use = jax_stats.get("peak_bytes_in_use"), jax_stats.get("bytes_in_use")
+        gap = None if (peak is None or in_use is None) else int(peak) - int(in_use)
+        extra = {"param_loading": loading, "load_peak_minus_in_use_bytes": gap,
+                 "load_peak_close_to_in_use": (gap is not None
+                                               and gap <= load_slack_bytes(in_use)),
+                 "load_slack_bytes": load_slack_bytes(in_use)}
+    return {"model": model, "framework": framework, **extra,
             "allocator_in_use_gib": _gib(allocated),
             "allocator_peak_during_load_gib": _gib(
                 torch_stats.get("max_memory_allocated") if framework == "torch"

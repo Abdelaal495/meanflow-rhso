@@ -45,6 +45,13 @@ class PMFAdapter(MeanFlowAdapter):
         jax, jnp = self.jax, self.jnp
         t_start = time.perf_counter()
         rcfg = self.registry
+        # "device" (default): the original loader below, unchanged.  "host_once" (opt-in):
+        # see `_host_loading_scope` -- same code, same checkpoint, run on the host; only the
+        # selected EMA parameters are transferred to the device, once.
+        self.param_loading = str(rcfg.get("param_loading") or "device")
+        if self.param_loading not in ("device", "host_once"):
+            raise ValueError("pmf param_loading must be 'device' or 'host_once', got %r"
+                             % self.param_loading)
         # The repository's logging utilities import wandb at module scope; this
         # run never logs, so an absent wandb must not block a checkpoint load.
         stub_missing_module("wandb")
@@ -101,9 +108,15 @@ class PMFAdapter(MeanFlowAdapter):
                 data_proportion=cfg.model.data_proportion, cfg_beta=cfg.model.cfg_beta,
                 cfg_max=cfg.model.cfg_max, class_dropout_prob=cfg.model.class_dropout_prob,
                 norm_p=cfg.model.norm_p, norm_eps=cfg.model.norm_eps, eval=True)
-            state = create_train_state(jax.random.key(0), cfg, self._model,
-                                       cfg.dataset.image_size, lr_schedules(cfg, 1000))
-            state = restore_checkpoint(state, cfg.load_from)
+            if self.param_loading == "device":
+                state = create_train_state(jax.random.key(0), cfg, self._model,
+                                           cfg.dataset.image_size, lr_schedules(cfg, 1000))
+                state = restore_checkpoint(state, cfg.load_from)
+            else:
+                with self._host_loading_scope():
+                    state = create_train_state(jax.random.key(0), cfg, self._model,
+                                               cfg.dataset.image_size, lr_schedules(cfg, 1000))
+                    state = restore_checkpoint(state, cfg.load_from)
             self.step = int(state.step)
 
             available = list(state.ema_params.keys())
@@ -113,7 +126,12 @@ class PMFAdapter(MeanFlowAdapter):
             if wanted is not None and wanted not in available:
                 print("   Requested EMA key %r unavailable; using %r (available: %s)"
                       % (wanted, self.ema_key, available))
-            self._params = {"params": state.ema_params[self.ema_key]}
+            if self.param_loading == "device":
+                self._params = {"params": state.ema_params[self.ema_key]}
+            else:
+                # The ONE host -> device transfer: the selected EMA tree, nothing else.
+                self._params = {"params": host_to_device_once(
+                    jax, state.ema_params[self.ema_key])}
             self.noise_scale = float(rcfg["noise_scale"] if rcfg.get("noise_scale") is not None
                                      else cfg.model.noise_scale)
             del state
@@ -121,6 +139,8 @@ class PMFAdapter(MeanFlowAdapter):
         self._build_jitted()
         load_s = time.perf_counter() - t_start
         record_time("load/pmf", load_s)
+        provenance_extra = ({} if self.param_loading == "device"
+                            else {"param_loading": self.param_loading})
 
         self.spec = AdapterSpec(
             name="pmf", display_name=rcfg["display_name"], dynamics_family=MEANFLOW,
@@ -135,7 +155,41 @@ class PMFAdapter(MeanFlowAdapter):
                         "ckpt_dir": self.config.load_from, "step": self.step,
                         "model_str": self.config.model.model_str, "ema_key": self.ema_key,
                         "repo_rev": rcfg.get("repo_rev"), "noise_scale": self.noise_scale,
-                        "load_seconds": round(load_s, 2)})
+                        "load_seconds": round(load_s, 2), **provenance_extra})
+
+    def _host_loading_scope(self):
+        """JAX's default device set to the host CPU, for `param_loading: host_once`.
+
+        WHY.  The Task 1 pMF run measured a model-only allocator peak of 7.85 GiB for 1.55
+        GiB (= P) of resident parameters.  Reading pMF's code at the pinned revision, the
+        default loader runs its training-state code on the GPU:
+          * utils/trainstate_util.create_train_state jit-initialises a RANDOM parameter tree
+            (1 x P on the device) and builds ema_params for EMA values 500, 1000 and 2000 by
+            `deepcopy(params)` then `update_ema(copy, params, alpha=0.0)`, leaf by leaf while
+            the copy is alive.  At the third EMA: params + two finished EMA trees + the copy
+            + the tree being built = 5 x P; 4 x P afterwards (eval mode uses optax.sgd(0),
+            which has no optimiser state);
+          * utils/ckpt_util.restore_checkpoint (flax -> orbax, restore args taken from that
+            device-resident target) then materialises the checkpoint's ema_params[1000]
+            (1 x P; the archive holds only that tree and `step`) on the device while the
+            4 x P random state is still alive: 5 x P again.
+        With P = 1.55 GiB, 5 x P = 7.75 GiB plus init temporaries: the 7.85 GiB peak.  Every
+        byte of it but the selected EMA tree is a random initialisation that is discarded.
+
+        Here the same two calls run with the CPU as JAX's default device, so the random
+        state and the restored tree live in host memory (orbax restores onto the target's
+        CPU sharding), and `host_to_device_once` moves the selected tree to the GPU.  The
+        restore copies the checkpoint's bytes in both modes, so the parameters are bitwise
+        identical.  Raises (never silently falls back) when JAX has no CPU backend.
+        """
+        jax = self.jax
+        try:
+            cpu = jax.devices("cpu")[0]
+        except Exception as exc:
+            raise RuntimeError(
+                "pmf param_loading='host_once' needs JAX's CPU backend (is JAX_PLATFORMS "
+                "restricted to the GPU?): %s: %s" % (type(exc).__name__, exc))
+        return jax.default_device(cpu)
 
     def _build_jitted(self) -> None:
         jax, jnp = self.jax, self.jnp
@@ -218,6 +272,17 @@ class PMFAdapter(MeanFlowAdapter):
         native = np.asarray(self.to_native_noise(raw))
         ok = np.allclose(native, raw * self.noise_scale, atol=1e-6)
         return ok, "noise_scale=%.3f applied as in generate()" % self.noise_scale
+
+
+def host_to_device_once(jax, tree):
+    """Transfer a host-resident parameter tree to JAX's default (accelerator) device.
+
+    One `device_put` of the whole tree onto the device the default loader would have used
+    (`jax.devices()[0]`), committed exactly as orbax's restore onto a device-resident target
+    commits it.  A byte copy: values, dtypes and the tree structure are unchanged.
+    """
+    device = jax.devices()[0]
+    return jax.block_until_ready(jax.device_put(tree, device))
 
 
 @register_adapter("pmf")

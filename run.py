@@ -1839,6 +1839,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
             key = warmup_key(spec, problem)
             warm_seconds = warmed.get(key, 0.0)
+            before_warm_up = None
+            if timing_detail:
+                # Task 9: what the allocator had seen before THIS configuration's warm-up, so
+                # an exact JAX peak can prove nothing else in the process set it.
+                from src.timing import memory_snapshot
+                before_warm_up = memory_snapshot(adapter.spec.framework)
             try:
                 if do_warmup and key not in warmed:
                     warm_seconds = warm_up(adapter, spec, problem, manager)
@@ -1851,7 +1857,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 timing = None
                 if timing_detail:
                     from src.timing import TimingDetail
-                    timing = TimingDetail(adapter.spec.framework, after_load=after_load)
+                    timing = TimingDetail(adapter.spec.framework, after_load=after_load,
+                                          before_warm_up=before_warm_up,
+                                          param_loading=getattr(adapter, "param_loading",
+                                                                None))
                     from src.timing import attach_jax_sampler
                     timing.jax_sampler = attach_jax_sampler(profiler)
                 run = run_job(adapter, spec, problem, manager, profiler=profiler,

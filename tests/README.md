@@ -25,6 +25,7 @@ python tests/test_matched_time.py           # needs jax + pyyaml (imports run.py
 python tests/test_budget_levels.py          # needs jax + pyyaml (imports run.py), bash
 python tests/test_budget_levels_lrscaled.py # needs jax + pyyaml (imports run.py)
 python tests/test_anchor_schedules.py       # needs jax + optax + torch + pyyaml (imports run.py), git
+python tests/test_paper_timing.py           # needs jax + pyyaml (imports run.py)
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -247,6 +248,18 @@ freeze script on a planted tuning run (selection, shared mu0 = 0 blocks, frozen 
 resolving at 100 images with the benchmark batch sizes, tuning curves, incomplete grids
 refused) and the table script on planted runs (paired_stats bootstrap, "same run" rows,
 unpaired reference row).
+
+`test_paper_timing.py` covers rebuttal Task 9: pMF's `param_loading: host_once` is off by
+default (registry default, every committed config but the two pmf_exact files, rejected for
+other models; iMF untouched); on a synthetic pMF repository and checkpoint that follows pMF's
+own create_train_state / restore_checkpoint sequence, both loaders give bitwise identical
+parameters, host_once runs that code with the CPU as JAX's default device and transfers once;
+`exact_jax_peak` reports exact only when the load peak is close to the resident bytes, nothing
+raised it before the warm-up and it rose afterwards; the four generated configs regenerate,
+pmf_exact equals timing_pmf's 45 blocks, and the JiT-L/16 step counts equal the task's table
+and pMF-L/16's frozen values; the driver refuses --with-checks for an exact-peak config;
+`summarize_timing.py --compare-to` flags > 5%, and `--main-table` writes the table or refuses
+(writing nothing) on mixed GPU types or a non-exact JAX cell.
 
 `test_matched_configs.py`, `test_hpo_lock.py` and `test_paired_stats.py` cover the
 matched-budget comparison of RHSO and MPC-Δt (rebuttal Task 2). The first resolves the

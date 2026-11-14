@@ -32,6 +32,24 @@ Outputs in --out: timing_summary.csv (one row per job), timing_fe_spread.csv (on
 prior) and timing_tables.tex with three tables in the layout of Table 29 (prior as a
 multirow first column, one row per method, one column per task): seconds per image,
 allocator peak memory, and cost per forward-equivalent.
+
+Rebuttal Task 9 additions
+  * EXACT JAX peak (pMF `param_loading: host_once`, src/timing.exact_jax_peak): such a job
+    reports ONE number, its exact allocator high-water mark; when the exactness conditions
+    fail it is flagged NOT EXACT with the reason, never bracketed.
+  * --compare-to RUN: per configuration (same experiment block), seconds per image against
+    RUN (e.g. timing_pmf_exact against timing_pmf); differences above 5% are flagged, and
+    PSNR / SSIM / LPIPS differences are listed (identical parameters give identical
+    quality, up to kernel choices).  Writes timing_compare.csv.
+  * --main-table PMF_RUN JITL_RUN: the main-paper table (methods x tasks; per cell seconds
+    per image mean +- sd, exact peak GiB, evaluations / backprops per image; per checkpoint
+    its model-only resident memory, framework and precision).  REFUSES to write when the two
+    runs used different GPU types or any JAX cell is not exact.  Writes main_table.tex and
+    main_table.csv.
+
+    python scripts/summarize_timing.py outputs/timing_pmf_exact --compare-to outputs/timing_pmf
+    python scripts/summarize_timing.py --main-table outputs/timing_pmf_exact outputs/timing_jitl \
+        --out outputs/timing_main_table
 """
 import argparse
 import csv
@@ -75,6 +93,8 @@ ROW_ORDER = {key: i for i, (key, _) in enumerate(ROWS)}
 DISAGREEMENT = 0.05            # relative outer-vs-method gap that is flagged ...
 DISAGREEMENT_ABS = 0.02        # ... when it also exceeds this many seconds per image
 UNINFORMATIVE_BYTES = 2 ** 20  # JAX upper bound within 1 MiB of the model-only load peak
+EXACT_MODE = "exact_jax_host_once"   # src/timing.py TimingDetail._exact_jax_peak
+COMPARE_TOLERANCE = 0.05             # --compare-to: seconds per image may differ by <= 5%
 
 CSV_COLUMNS = [
     "prior", "prior_name", "task", "method", "variant", "row_label", "experiment", "job_id",
@@ -86,7 +106,9 @@ CSV_COLUMNS = [
     "allocator_peak_lower_gib", "allocator_peak_upper_gib", "allocator_peak_uninformative",
     "allocator_peak_scope", "allocator_peak_source", "allocator_incremental_over_model_gib",
     "nvml_process_reserved_peak_gib", "nvml_incremental_over_model_gib",
-    "model_only_allocator_gib", "model_only_nvml_reserved_gib", "gpu_name",
+    "model_only_allocator_gib", "model_only_nvml_reserved_gib",
+    "allocator_peak_mode", "allocator_peak_not_exact_reasons", "param_loading", "framework",
+    "checkpoint_name", "gpu_name",
     "gpu_memory_total_mib", "sync_method", "jax_pool_bytes_before", "jax_pool_bytes_after",
     "jax_bytes_limit", "run_dir",
 ]
@@ -139,6 +161,28 @@ def load_run(run_dir):
     return list(jobs.values()), baselines
 
 
+def load_provenance(run_dir):
+    """{model: provenance} from the run's run_metadata*.json (checkpoint variant, dtype)."""
+    run_dir = Path(run_dir)
+    out = {}
+    for path in sorted(run_dir.glob("run_metadata*.json")):
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            continue
+        for model, prov in (payload.get("model_provenance") or {}).items():
+            out.setdefault(model, prov or {})
+    return out
+
+
+def checkpoint_name(model, provenance):
+    """pMF-L/16, JiT-L/16, ...: the variant recorded at load time when there is one."""
+    prov = (provenance or {}).get(model) or {}
+    if model == "jit" and prov.get("variant"):
+        return str(prov["variant"])
+    return PRIOR_NAME.get(model, model)
+
+
 def per_image_seconds(payload):
     """(values, basis, method-timer mean) for one job."""
     detail = payload.get("timing_detail") or {}
@@ -188,13 +232,14 @@ def summarise_job(payload, baselines):
     exact = detail.get("allocator_peak_exact")
     if exact is None:                            # PyTorch fallback above, or older records
         exact = scope == "timed_region"
+    mode = detail.get("allocator_peak_mode")
     lower = fnum(detail.get("allocator_peak_lower_gib"))
     upper = fnum(detail.get("allocator_peak_upper_gib"))
     if upper is None and alloc is not None:
         upper = alloc
         lower = alloc if exact else lower
     uninformative = False
-    if not exact and upper is not None:
+    if not exact and upper is not None and mode != EXACT_MODE:
         up_bytes = detail.get("allocator_peak_upper_bytes")
         base_bytes = base.get("allocator_peak_during_load_bytes")
         if up_bytes is not None and base_bytes is not None:
@@ -231,6 +276,14 @@ def summarise_job(payload, baselines):
                                             if nvml is not None and base_nvml is not None
                                             else None),
         "model_only_allocator_gib": base_alloc, "model_only_nvml_reserved_gib": base_nvml,
+        "allocator_peak_mode": mode,
+        "allocator_peak_not_exact_reasons": "; ".join(
+            detail.get("allocator_peak_not_exact_reasons") or []),
+        "param_loading": detail.get("param_loading"),
+        "framework": payload.get("framework"),
+        "checkpoint_name": PRIOR_NAME.get(model, model),
+        "psnr": fnum(payload.get("psnr")), "ssim": fnum(payload.get("ssim")),
+        "lpips": fnum(payload.get("lpips")),
         "gpu_name": hardware.get("gpu_name"),
         "gpu_memory_total_mib": hardware.get("gpu_memory_total_mib"),
         "sync_method": detail.get("sync_method"),
@@ -251,8 +304,15 @@ def collect(run_dirs):
     rows, baselines_all = [], {}
     for run_dir in run_dirs:
         jobs, baselines = load_run(run_dir)
+        provenance = load_provenance(run_dir)
         baselines_all.update(baselines)
-        rows.extend(summarise_job(job, baselines) for job in jobs)
+        for job in jobs:
+            row = summarise_job(job, baselines)
+            row["checkpoint_name"] = checkpoint_name(row["prior"], provenance)
+            # The label follows the checkpoint actually loaded (JiT-L/16 for timing_jitl);
+            # for every Task 1 run it is the PRIOR_NAME it always was.
+            row["prior_name"] = row["checkpoint_name"]
+            rows.append(row)
     ok = sorted((r for r in rows if r["status"] == "ok"), key=sort_key)
     bad = sorted((r for r in rows if r["status"] != "ok"), key=sort_key)
     return ok, bad, baselines_all
@@ -272,7 +332,7 @@ def fe_spread(rows):
         hi = max(mine, key=lambda r: r["seconds_per_forward_equivalent"])
         mean = statistics.fmean(values)
         out.append({
-            "prior": prior, "prior_name": PRIOR_NAME.get(prior, prior),
+            "prior": prior, "prior_name": mine[0]["prior_name"],
             "gpu_names": ";".join(gpus), "rows": len(mine),
             "fe_seconds_min": min(values), "fe_seconds_max": max(values),
             "fe_max_over_min": (max(values) / min(values)) if min(values) > 0 else None,
@@ -306,6 +366,11 @@ def caption_gpu(rows):
     return known.pop() if len(known) == 1 else ("mixed GPUs" if known else "GPU unknown")
 
 
+def _label_of(rows, prior):
+    names = sorted({r["prior_name"] for r in rows if r["prior"] == prior})
+    return " / ".join(names) if names else PRIOR_NAME.get(prior, prior)
+
+
 # ------------------------------------------------------------------ LaTeX
 def _cell(value, fmt, mark=""):
     return "--" if value is None else (fmt % value) + mark
@@ -315,6 +380,8 @@ def memory_cell(r, latex=True):
     """Exact value (PyTorch; JAX when its peak rose in the timed region) or lower--upper."""
     if r["allocator_peak_exact"]:
         return _cell(r["allocator_peak_gib"], "%.2f")
+    if r.get("allocator_peak_mode") == EXACT_MODE:
+        return "not exact"
     lo, hi = r["allocator_peak_lower_gib"], r["allocator_peak_upper_gib"]
     if hi is None:
         return "--"
@@ -370,7 +437,7 @@ def latex_table(rows, baselines, quantity, gpu, fe_unit="ms"):
             body.append(("Model only", None if base is None else "%.2f" % base))
         n = len(body)
         for i, (label_, cells) in enumerate(body):
-            first = ("\\multirow{%d}{*}{%s}" % (n, PRIOR_NAME.get(prior, prior))) if i == 0 else ""
+            first = ("\\multirow{%d}{*}{%s}" % (n, _label_of(rows, prior))) if i == 0 else ""
             if isinstance(cells, list):
                 lines.append("%s & %s & %s \\\\" % (first, label_, " & ".join(cells)))
             else:
@@ -393,11 +460,18 @@ def latex_table(rows, baselines, quantity, gpu, fe_unit="ms"):
 def print_tables(rows, baselines, per_prior_gpus):
     for prior in [p for p in PRIOR_ORDER if any(r["prior"] == p for r in rows)]:
         gpus = ", ".join(sorted(str(n) for n in per_prior_gpus.get(prior, {None})))
-        print("\n%s  --  GPU: %s" % (PRIOR_NAME.get(prior, prior), gpus))
+        print("\n%s  --  GPU: %s" % (_label_of(rows, prior), gpus))
         base = baselines.get(prior) or {}
         print("  model-only baseline: allocator %s GiB in use, NVML reserved %s GiB"
               % (_cell(fnum(base.get("allocator_in_use_gib")), "%.3f"),
                  _cell(fnum(base.get("nvml_process_reserved_gib")), "%.3f")))
+        if base.get("param_loading"):
+            print("  parameter loading %s: load peak %s GiB vs %s GiB in use -> %s"
+                  % (base["param_loading"],
+                     _cell(fnum(base.get("allocator_peak_during_load_gib")), "%.3f"),
+                     _cell(fnum(base.get("allocator_in_use_gib")), "%.3f"),
+                     "close (exact peaks possible)" if base.get("load_peak_close_to_in_use")
+                     else "NOT close: the load still sets the peak"))
         print("  %-28s %-17s %8s %7s %16s %10s %11s %9s %9s"
               % ("method", "task", "Eval.", "BP", "s/img mean+-sd", "ms/FE", "alloc GiB",
                  "+model", "NVML GiB"))
@@ -412,7 +486,10 @@ def print_tables(rows, baselines, per_prior_gpus):
                      memory_cell(r, latex=False),
                      _cell(r["allocator_incremental_over_model_gib"], "%.3f"),
                      _cell(r["nvml_process_reserved_peak_gib"], "%.3f"),
-                     "  UNINFORMATIVE" if r["allocator_peak_uninformative"] else ""))
+                     "  UNINFORMATIVE" if r["allocator_peak_uninformative"] else
+                     ("  NOT EXACT: %s" % r["allocator_peak_not_exact_reasons"]
+                      if r.get("allocator_peak_mode") == EXACT_MODE
+                      and not r["allocator_peak_exact"] else "")))
     print("\n  alloc GiB: exact, or lo-hi for JAX (lo = max bytes_in_use sampled in the timed "
           "region, hi = lifetime peak_bytes_in_use of the one-configuration process).")
     print("  UNINFORMATIVE: hi equals the model-only baseline's load peak, so it was set by "
@@ -428,14 +505,244 @@ def write_csv(path, rows, columns):
             writer.writerow({k: row.get(k) for k in columns})
 
 
+# ------------------------------------------------------------------ Task 9: --compare-to
+COMPARE_COLUMNS = ["prior", "experiment", "row_label", "task", "seconds_per_image_mean",
+                   "reference_seconds_per_image_mean", "seconds_rel_diff", "flag",
+                   "psnr", "reference_psnr", "psnr_diff", "ssim_diff", "lpips_diff",
+                   "gpu_name", "reference_gpu_name", "job_id", "reference_job_id"]
+
+
+def compare_runs(rows, reference_rows, tolerance=COMPARE_TOLERANCE):
+    """Per configuration (prior, experiment block): seconds and quality against a reference."""
+    ref = {(r["prior"], r["experiment"]): r for r in reference_rows}
+    out = []
+    for r in rows:
+        other = ref.get((r["prior"], r["experiment"]))
+        if other is None:
+            out.append({"prior": r["prior"], "experiment": r["experiment"],
+                        "row_label": r["row_label"], "task": r["task"],
+                        "flag": "NO REFERENCE JOB", "job_id": r["job_id"]})
+            continue
+        a, b = r["seconds_per_image_mean"], other["seconds_per_image_mean"]
+        rel = (a - b) / b if a is not None and b else None
+
+        def diff(k):
+            return (None if r.get(k) is None or other.get(k) is None
+                    else r[k] - other[k])
+        flags = []
+        if rel is None:
+            flags.append("NO TIMING")
+        elif abs(rel) > tolerance:
+            flags.append("SECONDS DIFFER BY %+.1f%%" % (100 * rel))
+        if r.get("gpu_name") != other.get("gpu_name"):
+            flags.append("DIFFERENT GPU")
+        out.append({"prior": r["prior"], "experiment": r["experiment"],
+                    "row_label": r["row_label"], "task": r["task"],
+                    "seconds_per_image_mean": a, "reference_seconds_per_image_mean": b,
+                    "seconds_rel_diff": rel, "flag": "; ".join(flags),
+                    "psnr": r.get("psnr"), "reference_psnr": other.get("psnr"),
+                    "psnr_diff": diff("psnr"), "ssim_diff": diff("ssim"),
+                    "lpips_diff": diff("lpips"), "gpu_name": r.get("gpu_name"),
+                    "reference_gpu_name": other.get("gpu_name"), "job_id": r["job_id"],
+                    "reference_job_id": other["job_id"]})
+    return out
+
+
+def print_compare(cmp_rows, reference, tolerance=COMPARE_TOLERANCE):
+    print("\nCOMPARISON with %s (seconds per image; flagged above %.0f%%; quality differences "
+          "should be zero for identical parameters)" % (reference, 100 * tolerance))
+    for c in cmp_rows:
+        if c.get("seconds_rel_diff") is None:
+            print("  %-34s %s" % (c["experiment"], c["flag"]))
+            continue
+        print("  %-34s %8.3f vs %8.3f s/img  %+6.1f%%  dPSNR %s  dSSIM %s  dLPIPS %s  %s"
+              % (c["experiment"], c["seconds_per_image_mean"],
+                 c["reference_seconds_per_image_mean"], 100 * c["seconds_rel_diff"],
+                 _cell(c["psnr_diff"], "%+.4f"), _cell(c["ssim_diff"], "%+.5f"),
+                 _cell(c["lpips_diff"], "%+.5f"), c["flag"] or "ok"))
+    n_flag = sum(1 for c in cmp_rows if c["flag"])
+    print("  %d of %d configuration(s) flagged" % (n_flag, len(cmp_rows)))
+
+
+# ------------------------------------------------------------------ Task 9: --main-table
+MAIN_METHODS = [("sdedit", "Plain sampling"), ("pnp", "PnP-Flow"), ("flower", "Flower"),
+                ("dflow", "D-Flow"), ("mpc_rhc", "MPC-RHC"),
+                ("mpc_delta_t", "MPC-$\\Delta t$"), ("rhso", "RHSO")]
+MAIN_COLUMNS = ["checkpoint", "framework", "precision", "model_only_gib", "method",
+                "method_label", "task", "seconds_per_image_mean", "seconds_per_image_sd",
+                "peak_gib", "peak_exact", "peak_scope", "evals_per_image", "bp_per_image",
+                "gpu_name", "job_id", "run_dir"]
+
+
+class MainTableRefused(SystemExit):
+    """The main table is not written; the message says why."""
+
+
+def precision_of(model, provenance):
+    prov = (provenance or {}).get(model) or {}
+    if model == "pmf":
+        return "FP32"
+    dtype = str(prov.get("network_dtype") or "")
+    if "bfloat16" in dtype:
+        return "BF16 network, FP32 integration"
+    if "float32" in dtype:
+        return "FP32"
+    return "precision not recorded"
+
+
+def main_table_rows(pmf_run, jitl_run):
+    """[(checkpoint dict, {(method, task): row})] for the two runs, base variants only."""
+    out = []
+    for run_dir, model in ((pmf_run, "pmf"), (jitl_run, "jit")):
+        rows, bad, baselines = collect([run_dir])
+        provenance = load_provenance(run_dir)
+        mine = {(r["method"], r["task"]): r for r in rows
+                if r["prior"] == model and r["variant"] == "base"}
+        if not mine:
+            raise MainTableRefused("main table: no finished %s job in %s" % (model, run_dir))
+        frameworks = sorted({str(r["framework"]) for r in mine.values()})
+        name = checkpoint_name(model, provenance)
+        if model == "jit" and not ((provenance.get("jit") or {}).get("variant")):
+            print("WARNING: %s records no JiT variant; labelled JiT-L/16 as passed" % jitl_run)
+            name = "JiT-L/16"
+        base = baselines.get(model) or {}
+        out.append(({"model": model, "name": name, "run_dir": str(run_dir),
+                     "framework": {"jax": "JAX", "torch": "PyTorch"}.get(frameworks[0],
+                                                                          frameworks[0])
+                     if len(frameworks) == 1 else "/".join(frameworks),
+                     "precision": precision_of(model, provenance),
+                     "model_only_gib": fnum(base.get("allocator_in_use_gib")),
+                     "bad": bad}, mine))
+    return out
+
+
+def main_table_refusals(checkpoints):
+    """Every reason the main table must not be written (empty list = write it)."""
+    reasons = []
+    gpus = {}
+    for ck, cells in checkpoints:
+        for r in cells.values():
+            gpus.setdefault(r.get("gpu_name"), []).append("%s %s/%s" % (ck["name"], r["method"],
+                                                                        r["task"]))
+    if None in gpus:
+        reasons.append("no GPU name recorded for %s" % ", ".join(gpus[None][:6]))
+    named = sorted(g for g in gpus if g)
+    if len(named) > 1:
+        reasons.append("the checkpoints ran on different GPU types: %s" % ", ".join(named))
+    for ck, cells in checkpoints:
+        for (method, task), r in sorted(cells.items()):
+            if r.get("framework") == "jax" and not r["allocator_peak_exact"]:
+                reasons.append("%s %s / %s: JAX peak not exact (%s)"
+                               % (ck["name"], method, task,
+                                  r.get("allocator_peak_not_exact_reasons")
+                                  or r.get("allocator_peak_scope") or "bracket"))
+    return reasons
+
+
+def main_table_latex(checkpoints, gpu):
+    lines = ["% Generated by scripts/summarize_timing.py --main-table; needs "
+             "\\usepackage{booktabs,multirow,makecell}.",
+             "\\begin{table}[t]", "\\centering",
+             "\\caption{Wall-clock time and exact peak GPU memory per image (batch size one, "
+             "%s). Each cell: seconds per image (mean $\\pm$ s.d. over 3 images); peak "
+             "allocator memory (GiB, model included); network evaluations / backpropagations "
+             "per image.}" % gpu,
+             "\\label{tab:runtime-memory}", "\\small",
+             "\\begin{tabular}{ll%s}" % ("c" * len(TASK_ORDER)), "\\toprule",
+             "Checkpoint & Method & %s \\\\" % " & ".join(TASK_NAME[t] for t in TASK_ORDER),
+             "\\midrule"]
+    for ci, (ck, cells) in enumerate(checkpoints):
+        methods = [(m, label) for m, label in MAIN_METHODS
+                   if any((m, t) in cells for t in TASK_ORDER)]
+        for i, (method, label) in enumerate(methods):
+            row = []
+            for task in TASK_ORDER:
+                r = cells.get((method, task))
+                if r is None:
+                    row.append("--")
+                    continue
+                sd = r["seconds_per_image_sd"]
+                row.append("\\makecell{%s \\\\ %s GiB \\\\ %d / %d}" % (
+                    ("%.2f $\\pm$ %.2f s" % (r["seconds_per_image_mean"], sd)) if sd is not None
+                    else _cell(r["seconds_per_image_mean"], "%.2f s"),
+                    _cell(r["allocator_peak_gib"], "%.2f"),
+                    round(r["evals_per_image"]), round(r["bp_per_image"])))
+            first = ("\\multirow{%d}{*}{%s}" % (len(methods), ck["name"])) if i == 0 else ""
+            lines.append("%s & %s & %s \\\\" % (first, label, " & ".join(row)))
+        lines.append("\\cmidrule(lr){1-%d}" % (2 + len(TASK_ORDER)))
+        lines.append("\\multicolumn{%d}{l}{\\footnotesize %s: model-only resident memory %s "
+                     "GiB; %s; %s.} \\\\"
+                     % (2 + len(TASK_ORDER), ck["name"], _cell(ck["model_only_gib"], "%.2f"),
+                        ck["framework"], ck["precision"]))
+        lines.append("\\midrule" if ci < len(checkpoints) - 1 else "\\bottomrule")
+    lines += ["\\end{tabular}", "\\end{table}"]
+    return "\n".join(lines) + "\n"
+
+
+def write_main_table(pmf_run, jitl_run, out_dir):
+    """Write main_table.tex / .csv, or raise MainTableRefused with every reason."""
+    checkpoints = main_table_rows(pmf_run, jitl_run)
+    reasons = main_table_refusals(checkpoints)
+    if reasons:
+        raise MainTableRefused("REFUSED: the main table was not written:\n  - "
+                               + "\n  - ".join(reasons))
+    gpu = short_gpu(next(r["gpu_name"] for _, cells in checkpoints for r in cells.values()))
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    csv_rows = []
+    for ck, cells in checkpoints:
+        for method, label in MAIN_METHODS:
+            for task in TASK_ORDER:
+                r = cells.get((method, task))
+                if r is None:
+                    continue
+                csv_rows.append({"checkpoint": ck["name"], "framework": ck["framework"],
+                                 "precision": ck["precision"],
+                                 "model_only_gib": ck["model_only_gib"], "method": method,
+                                 "method_label": label, "task": task,
+                                 "seconds_per_image_mean": r["seconds_per_image_mean"],
+                                 "seconds_per_image_sd": r["seconds_per_image_sd"],
+                                 "peak_gib": r["allocator_peak_gib"],
+                                 "peak_exact": r["allocator_peak_exact"],
+                                 "peak_scope": r["allocator_peak_scope"],
+                                 "evals_per_image": r["evals_per_image"],
+                                 "bp_per_image": r["bp_per_image"], "gpu_name": r["gpu_name"],
+                                 "job_id": r["job_id"], "run_dir": r["run_dir"]})
+    write_csv(out / "main_table.csv", csv_rows, MAIN_COLUMNS)
+    (out / "main_table.tex").write_text(main_table_latex(checkpoints, gpu))
+    missing = [(ck["name"], m, t) for ck, cells in checkpoints for m, _ in MAIN_METHODS
+               for t in TASK_ORDER if (m, t) not in cells]
+    return out / "main_table.tex", out / "main_table.csv", missing
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("run_dirs", nargs="+", help="run directories written by run_timing.py")
+    p.add_argument("run_dirs", nargs="*", help="run directories written by run_timing.py")
     p.add_argument("--out", default="outputs/timing_summary")
     p.add_argument("--fe-unit", choices=("ms", "s"), default="ms",
                    help="unit of the forward-equivalent table (default ms: seconds would "
                         "print 0.00 at two decimals)")
+    p.add_argument("--compare-to", default=None, metavar="RUN",
+                   help="Task 9: compare seconds per image (flag > 5%%) and quality per "
+                        "configuration with this run (e.g. timing_pmf)")
+    p.add_argument("--main-table", nargs=2, default=None, metavar=("PMF_RUN", "JITL_RUN"),
+                   help="Task 9: write the main-paper table from timing_pmf_exact and "
+                        "timing_jitl (refuses on mixed GPU types or a non-exact JAX cell)")
     args = p.parse_args(argv)
+    if args.main_table:
+        try:
+            tex, csv_path, missing = write_main_table(args.main_table[0], args.main_table[1],
+                                                      args.out)
+        except MainTableRefused as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        for name, method, task in missing:
+            print("NOTE: no %s %s / %s job; its cell is --" % (name, method, task))
+        print("wrote %s and %s" % (tex, csv_path))
+        if not args.run_dirs:
+            return 0
+    if not args.run_dirs:
+        p.error("give run directories, or --main-table PMF_RUN JITL_RUN")
 
     rows, bad, baselines = collect(args.run_dirs)
     if not rows:
@@ -476,6 +783,16 @@ def main(argv=None):
         print(w)
     print("\nwrote %s, %s, %s" % (out / "timing_summary.csv", out / "timing_fe_spread.csv",
                                   out / "timing_tables.tex"))
+    for r in rows:
+        if r.get("allocator_peak_mode") == EXACT_MODE and not r["allocator_peak_exact"]:
+            print("FLAG: %s %s %s: JAX peak NOT EXACT: %s"
+                  % (r["prior"], r["row_label"], r["task"], r["allocator_peak_not_exact_reasons"]))
+    if args.compare_to:
+        ref_rows, _, _ = collect([args.compare_to])
+        cmp_rows = compare_runs(rows, ref_rows)
+        print_compare(cmp_rows, args.compare_to)
+        write_csv(out / "timing_compare.csv", cmp_rows, COMPARE_COLUMNS)
+        print("wrote %s" % (out / "timing_compare.csv"))
     return 0
 
 

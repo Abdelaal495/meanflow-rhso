@@ -107,6 +107,18 @@ def resolve(args):
     return plan, Path(plan.output_dir).resolve(), by_block, timing_on
 
 
+def param_loading_modes(config_path):
+    """{model: param_loading} for the models whose config sets a non-default loader (Task 9)."""
+    from src.config import load_config, resolve_model_registry
+    config = load_config(config_path)
+    modes = {}
+    for model in (config.get("models") or {}):
+        mode = resolve_model_registry(config, model).get("param_loading")
+        if mode not in (None, "device"):
+            modes[model] = mode
+    return modes
+
+
 def is_complete(run_dir, spec, timing_required=True):
     """run.py's resume test, plus the timing_detail block when the config asks for it."""
     import run
@@ -343,6 +355,13 @@ def main(argv=None):
     args.timing_source = args.timing_source or [str(REPO_ROOT / "cluster_results")]
 
     plan, run_dir, by_block, timing_on = resolve(args)
+    loading = param_loading_modes(args.config)
+    if loading and args.with_checks:
+        raise SystemExit("%s loads %s with an exact-peak loader (%s); run.py's checks would "
+                         "allocate inside each measured process and void the exact JAX peak, "
+                         "so --with-checks is refused here."
+                         % (args.config, ", ".join(sorted(loading)),
+                            ", ".join("%s=%s" % kv for kv in sorted(loading.items()))))
     blocks = select_blocks(args, by_block)
     models = sorted({by_block[b].model for b in blocks}) or sorted({s.model for s in plan.specs})
     if args.rerun_all:
@@ -360,6 +379,9 @@ def main(argv=None):
 
     print("run dir : %s" % run_dir)
     print("child environment: %s" % " ".join("%s=%s" % kv for kv in TIMING_ENV.items()))
+    if loading:
+        print("parameter loading: %s  (exact JAX peak per configuration; src/timing.py "
+              "exact_jax_peak)" % ", ".join("%s=%s" % kv for kv in sorted(loading.items())))
     print("%d block(s) selected: %d already complete (skipped), %d to run; model-only "
           "baseline %s" % (len(blocks), len(done), len(remaining),
                            "already recorded (skipped)" if skip_baseline else "to run"))

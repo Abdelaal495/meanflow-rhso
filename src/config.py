@@ -107,6 +107,12 @@ MODEL_REGISTRY_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "ckpt_file": "pMF-L-16.zip",
         "config_yml": "configs/pMF_L_16_config.yml",
         "ema_key": 1000,                       # ema_params is a DICT keyed by EMA value
+        # How the parameters reach the device (src/models/pmf.py).  "device" (the default)
+        # is the repository's original loader.  "host_once" -- OPT-IN, set only by the exact
+        # JAX peak-memory timing configs -- builds the train state and restores the
+        # checkpoint on the HOST and transfers the selected EMA parameters once, so model
+        # loading never sets a JAX allocator peak above the resident parameters.
+        "param_loading": "device",
 
         "noise_scale": 1.0,
         "batch_size": 2,
@@ -189,6 +195,8 @@ MODEL_REGISTRY_DEFAULTS: Dict[str, Dict[str, Any]] = {
 }
 
 MODEL_NAMES: Tuple[str, ...] = tuple(MODEL_REGISTRY_DEFAULTS)
+# pMF parameter loading modes (see MODEL_REGISTRY_DEFAULTS["pmf"]["param_loading"]).
+PMF_PARAM_LOADING: Tuple[str, ...] = ("device", "host_once")
 
 
 @dataclass(frozen=True)
@@ -972,6 +980,10 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
         raise ConfigError("jit.checkpoint_backend='original_local' requires jit.local_checkpoint.")
     if not (0.0 < float(jit_cfg["t_eps"]) < 1.0):
         raise ConfigError("jit.t_eps must lie in (0, 1).")
+    pmf_cfg = resolve_model_registry(config, "pmf")
+    if pmf_cfg.get("param_loading") not in PMF_PARAM_LOADING:
+        raise ConfigError("models.pmf.param_loading must be one of %s, got %r."
+                          % (list(PMF_PARAM_LOADING), pmf_cfg.get("param_loading")))
     sit_cfg = resolve_model_registry(config, "sit")
     if (sit_cfg["guidance"] or {}).get("mode") not in ("official_first3", "all_channels"):
         raise ConfigError("sit.guidance.mode must be 'official_first3' or 'all_channels'.")

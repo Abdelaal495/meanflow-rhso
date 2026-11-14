@@ -11,6 +11,11 @@
 #     bash submit_timing.sh budget_levels --gpu h100:1 --time 03:00:00
 #         # Task 6: configs/experiments_rebuttal_timing_budget_levels.yaml (cheap and mid
 #         # budget levels, pMF and JiT in one job), run id timing_budget_levels
+#     bash submit_timing.sh pmf_exact --gpu h100:1 --time 06:00:00
+#         # Task 9: pMF-L/16 with exact JAX peak memory (param_loading: host_once), run id
+#         # timing_pmf_exact; its --smoke variant runs WITHOUT run.py's checks
+#     bash submit_timing.sh jitl --gpu h100:1 --time 06:00:00
+#         # Task 9: JiT-L/16, every method on all five tasks, run id timing_jitl
 #
 # Account, memory and CPUs come from `cluster.env` exactly as in submit.sh (account
 # auto-detected from ~/projects when there is exactly one).  The GPU is NOT taken from
@@ -28,8 +33,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 
 PRIOR="${1:-}"
 case "$PRIOR" in
-  pmf|jit|imf|sit|matched_time|budget_levels) shift ;;
-  *) echo "usage: bash submit_timing.sh pmf|jit|imf|sit|matched_time|budget_levels [--smoke] [--time HH:MM:SS] [--gpu G]"
+  pmf|jit|imf|sit|matched_time|budget_levels|pmf_exact|jitl) shift ;;
+  *) echo "usage: bash submit_timing.sh pmf|jit|imf|sit|matched_time|budget_levels|pmf_exact|jitl [--smoke] [--time HH:MM:SS] [--gpu G]"
      echo "       [--account A] [--mem M] [--cpus N] [--run-id ID] [--dry-run]"
      exit 2 ;;
 esac
@@ -70,8 +75,12 @@ if [ -z "$ACCOUNT" ]; then
   echo "ERROR: no allocation account. Set MPCFLOW_ACCOUNT in cluster.env or pass --account."
   exit 2
 fi
-case "$GPU" in
-  a100*) ;;
+case "$PRIOR:$GPU" in
+  pmf_exact:*|jitl:*)
+     # Task 9: the main-paper table needs both checkpoints on ONE GPU type (H100 80GB);
+     # summarize_timing.py --main-table refuses mixed GPU types.
+     ;;
+  *:a100*) ;;
   *) echo "WARNING: GPU '$GPU' is not an A100; Table 29 used A100-SXM4-40GB, and the summary"
      echo "         warns when the priors ran on different GPU types." ;;
 esac

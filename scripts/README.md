@@ -12,6 +12,7 @@
 | `make_budget_level_config.py`, `budget_level_table.py` | rebuttal Task 6: the cheap and mid budget levels on pMF and JiT (RHSO, MPC-Δt, D-Flow and MPC-RHC with their step knob set to the cheap methods' time and 4× that; 100-image quality config, timing config at batch size 1, smoke variants), and the per-level table: each method's lowest-LPIPS run within 1.1× the budget, paired differences against the level's best, wins and ties |
 | `make_budget_level_lrscaled_config.py` | rebuttal Task 7: Task 6's 66 budget-level entries with only the learning rate changed, `lr × (tuned knob / new knob)`, 100-image config and smoke variant; `budget_level_table.py --timing-ignore lr` pairs them with Task 6's timing run |
 | `make_anchor_schedule_tuning.py`, `freeze_anchor_schedules.py`, `anchor_schedule_table.py` | rebuttal Task 8: RHSO with a time-dependent state anchor (`mu_schedule`) on pMF; the mu0 tuning grid (22 per task on 8 tuning images, fields from the frozen entries), the freeze step (lowest LPIPS per task and schedule, 100-image config, tuning curves) and the 100-image table with paired differences against the retuned constant schedule |
+| `make_paper_timing_configs.py` | rebuttal Task 9: the main-paper timing configs, pMF-L/16 with exact JAX peak memory (`timing_pmf_exact`, the 45 Task 1 blocks with `param_loading: host_once`) and JiT-L/16 (`timing_jitl`, 7 methods x 5 tasks at pMF-L/16's step counts), with smoke variants; `summarize_timing.py --compare-to` and `--main-table` |
 | `check_fingerprints.py` | fails loudly unless every job of a Flower or matched-budget run has the benchmark run's measurement and initial-state fingerprints |
 | `extract_imagenet100_from_tar.py` | the same pool from a local ImageNet tar instead of the mirror |
 | `export_recon_bundle_only.py`, `add_corrupted_images_to_bundle.py` | package a run's reconstructions for sharing |
@@ -265,3 +266,31 @@ and LaTeX. The table reports, per task and schedule, mu0, PSNR / SSIM / LPIPS, t
 measurement RMSE next to σ and `schedule − constant` with `paired_stats.py`'s bootstrap
 (10,000 resamples, seed 20260903), plus the paper's frozen RHSO from run_9187465 as unpaired
 means (it ran on a different GPU type).
+
+## Main-paper runtime and exact peak memory (rebuttal Task 9)
+
+pMF loading used to set JAX's lifetime allocator peak: pMF's `create_train_state` builds a
+random parameter tree plus three EMA copies on the GPU (5 x the parameters at its peak), and
+the orbax restore materialises the checkpoint's EMA tree there while that state is alive.
+`models.pmf.param_loading: host_once` (opt-in; default `device`) runs the same two calls with
+the CPU as JAX's default device and transfers the selected EMA tree once: identical
+parameters, and a load peak equal to the resident parameters.  In a one-configuration timing
+process the lifetime `peak_bytes_in_use` is then that configuration's exact high-water mark
+(`src/timing.exact_jax_peak`; flagged NOT EXACT, with the reason, whenever that cannot be
+shown).  The driver refuses `--with-checks` for such a config.
+
+```bash
+python scripts/make_paper_timing_configs.py              # pmf_exact + jitl, each with a smoke
+bash submit_timing.sh pmf_exact --gpu h100:1 --time <HH:MM:SS>
+bash submit_timing.sh jitl --gpu h100:1 --time <HH:MM:SS>
+python scripts/summarize_timing.py outputs/timing_pmf_exact --compare-to outputs/timing_pmf
+python scripts/summarize_timing.py --main-table outputs/timing_pmf_exact outputs/timing_jitl \
+    --out outputs/timing_main_table
+```
+
+`--compare-to` flags any configuration whose seconds per image differ by more than 5% and
+lists the PSNR / SSIM / LPIPS differences (`timing_compare.csv`).  `--main-table` writes
+`main_table.tex` (needs booktabs, multirow, makecell) and `main_table.csv`: methods x tasks,
+each cell seconds per image (mean +- sd), exact peak GiB and evaluations / backprops per
+image, plus each checkpoint's model-only resident memory, framework and precision.  It writes
+nothing, and exits 2, if the two runs used different GPU types or any JAX cell is not exact.
